@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!--
+  Drive wheel macro.
+  Usage (4WD skid-steer — one per corner):
+    <xacro:drive_wheel prefix="front_left"  x_pos="${wheel_x_offset}"  y_reflect=" 1"/>
+    <xacro:drive_wheel prefix="front_right" x_pos="${wheel_x_offset}"  y_reflect="-1"/>
+    <xacro:drive_wheel prefix="rear_left"   x_pos="${-wheel_x_offset}" y_reflect=" 1"/>
+    <xacro:drive_wheel prefix="rear_right"  x_pos="${-wheel_x_offset}" y_reflect="-1"/>
+
+  prefix     : link/joint name prefix (e.g. "front_left")
+  x_pos      : longitudinal position of the wheel axis (default 0)
+  y_reflect  : +1 (left) or -1 (right) — mirrors Y position
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="drive_wheel" params="prefix y_reflect x_pos:=0">
+
+    <link name="${prefix}_wheel_link">
+      <visual>
+        <!--
+          Cylinder default axis is Z; rotate PI/2 around X so the spinning
+          axis aligns with Y (REP-103: left/right axis).
+        -->
+        <origin xyz="0 0 0" rpy="${PI/2.0} 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+        <material name="wheel_black"/>
+      </visual>
+
+      <!-- Separate hub disc for the coloured alloy rim -->
+      <visual>
+        <origin xyz="0 0 0" rpy="${PI/2.0} 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius * 0.55}" length="${wheel_width * 1.05}"/>
+        </geometry>
+        <material name="wheel_hub_blue"/>
+      </visual>
+
+      <collision>
+        <origin xyz="0 0 0" rpy="${PI/2.0} 0 0"/>
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}"/>
+        </geometry>
+      </collision>
+
+      <!-- Inertia: cylinder axis along Y -->
+      <xacro:cylinder_inertia_y m="${wheel_mass}" r="${wheel_radius}" h="${wheel_width}"/>
+    </link>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child  link="${prefix}_wheel_link"/>
+      <!--
+        x = x_pos          : longitudinal position (front axle +, rear axle −).
+        y = ±wheel_y_offset : lateral position from centreline.
+        z = 0              : same height as base_link (wheel axis).
+      -->
+      <origin xyz="${x_pos} ${y_reflect * wheel_y_offset} 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>

@@ -1,0 +1,29 @@
+# Costmap filter infrastructure — keepout zones and speed limits.
+#
+# Enable with: navigation.launch.py use_keepout_filter:=true
+#                                   keepout_mask:=~/maps/keepout_mask.yaml
+#
+# How it works:
+#   filter_mask_server   → publishes /costmap_filter_mask (OccupancyGrid)
+#   costmap_filter_info_server → publishes /costmap_filter_info
+#   KeepoutFilter in global_costmap reads /costmap_filter_info
+#
+# Editing the keepout mask:
+#   1. Open maps/keepout_mask.pgm in GIMP
+#   2. Paint black (0) over zones the robot must NOT enter
+#   3. White (254) = passable, Black (0) = keepout
+#   4. Export as PGM (ASCII or Binary), update keepout_mask.yaml if map size changes
+
+filter_mask_server:
+  ros__parameters:
+    use_sim_time: false
+    yaml_filename: ""     # set at launch via keepout_mask:=<path.yaml>
+
+costmap_filter_info_server:
+  ros__parameters:
+    use_sim_time: false
+    type: 0               # 0 = KeepoutFilter
+    filter_info_topic: "/costmap_filter_info"
+    mask_topic: "/costmap_filter_mask"
+    base: 0.0
+    multiplier: 1.0

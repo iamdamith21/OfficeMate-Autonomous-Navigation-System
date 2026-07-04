@@ -1,0 +1,66 @@
+<?xml version="1.0"?>
+<!--
+  Caster wheel macro — two-joint model: swivel (Z) + roll (Y).
+  Usage:
+    <xacro:caster_wheel prefix="front" x_pos=" 0.170"/>
+    <xacro:caster_wheel prefix="rear"  x_pos="-0.170"/>
+
+  prefix  : "front" or "rear"
+  x_pos   : X position of the caster relative to base_link
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="caster_wheel" params="prefix x_pos">
+
+    <!-- ── Swivel link (virtual) ── -->
+    <link name="${prefix}_caster_steer_link">
+      <xacro:null_inertia/>
+    </link>
+
+    <!--
+      Swivel joint: continuous rotation around Z (free-swivelling caster).
+      Positioned at (x_pos, 0, caster_z_offset) from base_link.
+      caster_z_offset = caster_radius − wheel_radius = 0.025 − 0.065 = −0.040 m
+      so the caster wheel centre is exactly at caster_radius = 0.025 m from ground.
+    -->
+    <joint name="${prefix}_caster_steer_joint" type="continuous">
+      <parent link="base_link"/>
+      <child  link="${prefix}_caster_steer_link"/>
+      <origin xyz="${x_pos} 0 ${caster_z_offset}" rpy="0 0 0"/>
+      <axis xyz="0 0 1"/>
+    </joint>
+
+    <!-- ── Wheel link ── -->
+    <link name="${prefix}_caster_wheel_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="${PI/2.0} 0 0"/>
+        <geometry>
+          <cylinder radius="${caster_radius}" length="${caster_width}"/>
+        </geometry>
+        <material name="caster_grey"/>
+      </visual>
+      <!--
+        Sphere collision gives smoother physics when the caster swivels;
+        radius equals caster_radius.
+      -->
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <sphere radius="${caster_radius}"/>
+        </geometry>
+      </collision>
+
+      <xacro:cylinder_inertia_y m="${caster_mass}" r="${caster_radius}" h="${caster_width}"/>
+    </link>
+
+    <!-- Roll joint: continuous rotation around Y -->
+    <joint name="${prefix}_caster_wheel_joint" type="continuous">
+      <parent link="${prefix}_caster_steer_link"/>
+      <child  link="${prefix}_caster_wheel_link"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>

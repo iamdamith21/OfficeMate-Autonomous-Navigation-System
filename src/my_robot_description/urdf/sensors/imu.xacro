@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<!--
+  MPU9250 IMU frame (frame_id of /imu/data_raw from arduino_bridge).
+
+  Mounted on the electronics deck near the chassis centre, axes per REP-103
+  (X forward, Y left, Z up). If the physical module ends up rotated on the
+  deck, correct it here with the rpy of imu_joint — never in software.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="imu" params="">
+
+    <link name="imu_link">
+      <visual>
+        <geometry>
+          <box size="0.025 0.020 0.005"/>
+        </geometry>
+        <material name="lidar_black"/>
+      </visual>
+    </link>
+
+    <joint name="imu_joint" type="fixed">
+      <parent link="body_link"/>
+      <child  link="imu_link"/>
+      <!-- 5 cm above the chassis platform, centred -->
+      <origin xyz="0 0 ${-body_height/2.0 + 0.05}" rpy="0 0 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>

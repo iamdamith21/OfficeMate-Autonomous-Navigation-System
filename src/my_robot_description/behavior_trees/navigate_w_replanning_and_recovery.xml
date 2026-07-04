@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<!--
+  navigate_w_replanning_and_recovery.xml
+  Custom BT for my_robot — differential drive, indoor SLAM navigation.
+
+  Strategy:
+    1. Replan path at 1 Hz (catches newly observed obstacles).
+    2. Clear local costmap if path following fails (un-sticks false positives).
+    3. Clear global costmap if replanning fails repeatedly.
+    4. Recovery sequence (up to 6 total attempts):
+         a. Clear both costmaps
+         b. Spin 90°  (unstick + rescan surroundings)
+         c. Wait 5 s  (let environment settle)
+         d. Back up 30 cm  (escape local minima)
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+
+      <PipelineSequence name="NavigateWithReplanning">
+
+        <!-- Recompute global plan at 1 Hz -->
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose
+              goal="{goal}"
+              path="{path}"
+              planner_id="GridBased"/>
+            <ClearEntireCostmap
+              name="ClearGlobalCostmap-Context"
+              service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+
+        <!-- Follow the path; clear local costmap on one failure before giving up -->
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath
+            path="{path}"
+            controller_id="FollowPath"/>
+          <ClearEntireCostmap
+            name="ClearLocalCostmap-Context"
+            service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+
+      </PipelineSequence>
+
+      <!-- Recovery fallback — runs when the pipeline above fails completely -->
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap
+              name="ClearLocalCostmap-Subtree"
+              service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap
+              name="ClearGlobalCostmap-Subtree"
+              service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+
+          <Spin
+            spin_dist="1.5708"/>
+
+          <Wait
+            wait_duration="5"/>
+
+          <BackUp
+            backup_dist="0.30"
+            backup_speed="0.10"/>
+
+        </RoundRobin>
+      </ReactiveFallback>
+
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

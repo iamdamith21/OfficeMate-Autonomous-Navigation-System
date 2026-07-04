@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<!--
+  Base structure:  base_footprint → base_link → body_link
+  base_footprint  : REP-105 ground-projected origin (virtual, no geometry)
+  base_link       : wheel-axis height; holds the chassis platform visual
+  body_link       : the white enclosure box above the chassis
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="base" params="">
+
+    <!-- ── base_footprint ── -->
+    <link name="base_footprint"/>
+
+    <joint name="base_joint" type="fixed">
+      <parent link="base_footprint"/>
+      <child  link="base_link"/>
+      <!-- Raise by wheel_radius so base_link sits at wheel-axis height -->
+      <origin xyz="0 0 ${wheel_radius}" rpy="0 0 0"/>
+    </joint>
+
+    <!-- ── base_link ── wheel-axis height, chassis platform -->
+    <link name="base_link">
+      <visual>
+        <!--
+          Chassis plate centred half-way between base_link and ground:
+          top at z=0 (= wheel axis), bottom at z = −chassis_thickness
+        -->
+        <origin xyz="0 0 ${-chassis_thickness/2.0}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${body_length} ${body_width} ${chassis_thickness}"/>
+        </geometry>
+        <material name="chassis_grey"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${-chassis_thickness/2.0}" rpy="0 0 0"/>
+        <geometry>
+          <box size="${body_length} ${body_width} ${chassis_thickness}"/>
+        </geometry>
+      </collision>
+      <xacro:box_inertia m="${chassis_mass}"
+                         l="${body_length}" w="${body_width}" h="${chassis_thickness}"/>
+    </link>
+
+    <!-- ── body_link ── the enclosure box -->
+    <joint name="body_joint" type="fixed">
+      <parent link="base_link"/>
+      <child  link="body_link"/>
+      <!--
+        body_link origin is at the CENTRE of the box.
+        Box bottom = base_link level (z=0 from base_link).
+        Box top    = z = body_height = 0.535 m from base_link  →  0.600 m from ground.
+        Centre     = z = body_height/2
+      -->
+      <origin xyz="0 0 ${body_height/2.0}" rpy="0 0 0"/>
+    </joint>
+
+    <link name="body_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${body_length} ${body_width} ${body_height}"/>
+        </geometry>
+        <material name="white"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry>
+          <box size="${body_length} ${body_width} ${body_height}"/>
+        </geometry>
+      </collision>
+      <xacro:box_inertia m="${body_mass}"
+                         l="${body_length}" w="${body_width}" h="${body_height}"/>
+    </link>
+
+  </xacro:macro>
+
+</robot>

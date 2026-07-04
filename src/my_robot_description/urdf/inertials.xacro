@@ -1,0 +1,47 @@
+<?xml version="1.0"?>
+<!-- Reusable inertia macros. Origins are at the geometry centre of mass. -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <!-- Solid box: l=X, w=Y, h=Z -->
+  <xacro:macro name="box_inertia" params="m l w h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia
+        ixx="${(1.0/12.0)*m*(w*w + h*h)}" ixy="0" ixz="0"
+        iyy="${(1.0/12.0)*m*(l*l + h*h)}" iyz="0"
+        izz="${(1.0/12.0)*m*(l*l + w*w)}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- Solid cylinder with principal axis along Z (e.g. lidar, column) -->
+  <xacro:macro name="cylinder_inertia_z" params="m r h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia
+        ixx="${(1.0/12.0)*m*(3.0*r*r + h*h)}" ixy="0" ixz="0"
+        iyy="${(1.0/12.0)*m*(3.0*r*r + h*h)}" iyz="0"
+        izz="${0.5*m*r*r}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- Solid cylinder with principal axis along Y (drive wheel / caster wheel).
+       r = wheel radius, h = wheel width along Y axis. -->
+  <xacro:macro name="cylinder_inertia_y" params="m r h">
+    <inertial>
+      <mass value="${m}"/>
+      <inertia
+        ixx="${(1.0/12.0)*m*(3.0*r*r + h*h)}" ixy="0" ixz="0"
+        iyy="${0.5*m*r*r}"                     iyz="0"
+        izz="${(1.0/12.0)*m*(3.0*r*r + h*h)}"/>
+    </inertial>
+  </xacro:macro>
+
+  <!-- Near-massless dummy inertia for virtual/structural links -->
+  <xacro:macro name="null_inertia" params="">
+    <inertial>
+      <mass value="0.001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </xacro:macro>
+
+</robot>

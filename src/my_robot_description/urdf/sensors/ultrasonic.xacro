@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<!--
+  HC-SR04 ultrasonic frame (frame_id of /ultrasonic/range from arduino_bridge).
+
+  Front face of the body, ~10 cm above ground, pointing forward (+X):
+  covers the low zone under the lidar's 0.63 m scan plane where chair legs,
+  door stops and stair edges hide.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="ultrasonic" params="">
+
+    <link name="ultrasonic_link">
+      <visual>
+        <geometry>
+          <box size="0.010 0.045 0.020"/>
+        </geometry>
+        <material name="lidar_black"/>
+      </visual>
+    </link>
+
+    <joint name="ultrasonic_joint" type="fixed">
+      <parent link="body_link"/>
+      <child  link="ultrasonic_link"/>
+      <!--
+        x: front face of the body.
+        z: body_link centre is 0.3325 m above ground; 0.035 above the
+           chassis-bottom edge puts the sensor 0.10 m above ground.
+      -->
+      <origin xyz="${body_length/2.0} 0 ${-body_height/2.0 + 0.035}" rpy="0 0 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>
