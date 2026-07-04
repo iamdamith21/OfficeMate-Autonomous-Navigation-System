@@ -1,20 +1,10 @@
 <?xml version="1.0"?>
 <!--
-  RPLidar / SLAMTEC spinning lidar macro.
-
-  The link is named "laser" to match the default frame_id used by sllidar_ros2.
-  joint type = continuous so the spinning motion is visible in RViz when
-  joint_state_publisher_gui is running.
-
-  For real-hardware nav2 use:
-    • sllidar_ros2 already de-rotates the scan data internally — the "laser"
-      frame can stay at 0 rad; joint_state_publisher will publish 0 for it.
-    • Alternatively change joint type to "fixed" if you prefer no joint state
-      dependency.
-
-  Mounted at the centre of the body_link top surface:
-    z from base_link = body_height = 0.535 m  →  0.600 m from ground.
-  Lidar centre is then 0.600 + lidar_height/2 = 0.630 m from ground.
+  LTME-02A lidar on the top deck. Frame "laser" (driver frame_id).
+  FIXED joint: the frame does not rotate in real use (driver outputs
+  de-rotated scans) so base->laser is on /tf_static — a continuous joint
+  would ride dynamic /tf at the joint-state rate and cause the 30 Hz scans
+  to be dropped by SLAM/Nav2.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -22,43 +12,22 @@
 
     <link name="laser">
       <visual>
-        <!--
-          Visual origin at lidar_height/2 so the bottom of the cylinder
-          sits on the body top surface.
-        -->
         <origin xyz="0 0 ${lidar_height/2.0}" rpy="0 0 0"/>
-        <geometry>
-          <cylinder radius="${lidar_radius}" length="${lidar_height}"/>
-        </geometry>
+        <geometry><cylinder radius="${lidar_radius}" length="${lidar_height}"/></geometry>
         <material name="lidar_black"/>
       </visual>
       <collision>
         <origin xyz="0 0 ${lidar_height/2.0}" rpy="0 0 0"/>
-        <geometry>
-          <cylinder radius="${lidar_radius}" length="${lidar_height}"/>
-        </geometry>
+        <geometry><cylinder radius="${lidar_radius}" length="${lidar_height}"/></geometry>
       </collision>
-      <!-- Cylinder spinning around Z -->
       <xacro:cylinder_inertia_z m="${lidar_mass}" r="${lidar_radius}" h="${lidar_height}"/>
     </link>
 
-    <!--
-      FIXED joint: the lidar frame does not rotate in real use (the driver
-      outputs de-rotated scans), so base->laser belongs on /tf_static —
-      valid for every timestamp. A continuous joint would put base->laser
-      on dynamic /tf at the joint_state_publisher rate (10 Hz); the 30 Hz
-      LTME-02A scans then arrive stamped newer than the latest laser TF and
-      SLAM/Nav2 drop them ("transform queue full"). Fixed removes that rate
-      dependency entirely.
-    -->
+    <!-- Mounted on the deck top surface, centred (270° FOV faces forward). -->
     <joint name="laser_joint" type="fixed">
-      <parent link="body_link"/>
+      <parent link="deck_link"/>
       <child  link="laser"/>
-      <!--
-        body_link origin is at the body centre.
-        body_height/2 brings us to the top surface of the body.
-      -->
-      <origin xyz="0 0 ${body_height/2.0}" rpy="0 0 0"/>
+      <origin xyz="0 0 ${deck_thickness/2.0}" rpy="0 0 0"/>
     </joint>
 
   </xacro:macro>

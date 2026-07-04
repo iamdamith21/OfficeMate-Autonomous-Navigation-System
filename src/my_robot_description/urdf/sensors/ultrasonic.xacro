@@ -1,33 +1,34 @@
 <?xml version="1.0"?>
 <!--
-  HC-SR04 ultrasonic frame (frame_id of /ultrasonic/range from arduino_bridge).
-
-  Front face of the body, ~10 cm above ground, pointing forward (+X):
-  covers the low zone under the lidar's 0.63 m scan plane where chair legs,
-  door stops and stair edges hide.
+  HC-SR04 ultrasonic on the compartment front face, ~10 cm above ground,
+  pointing forward (+X). Modelled as the sensor's twin transducers — two
+  grey "eyes". Frame "ultrasonic_link" (frame_id of /ultrasonic/range) sits
+  at the pair centre with +X = measurement direction.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:macro name="ultrasonic" params="">
 
     <link name="ultrasonic_link">
+      <!-- left eye -->
       <visual>
-        <geometry>
-          <box size="0.010 0.045 0.020"/>
-        </geometry>
-        <material name="lidar_black"/>
+        <origin xyz="0 ${us_eye_sep/2.0} 0" rpy="0 ${PI/2.0} 0"/>
+        <geometry><cylinder radius="${us_eye_radius}" length="${us_eye_length}"/></geometry>
+        <material name="ultrasonic_grey"/>
+      </visual>
+      <!-- right eye -->
+      <visual>
+        <origin xyz="0 ${-us_eye_sep/2.0} 0" rpy="0 ${PI/2.0} 0"/>
+        <geometry><cylinder radius="${us_eye_radius}" length="${us_eye_length}"/></geometry>
+        <material name="ultrasonic_grey"/>
       </visual>
     </link>
 
     <joint name="ultrasonic_joint" type="fixed">
-      <parent link="body_link"/>
+      <parent link="base_link"/>
       <child  link="ultrasonic_link"/>
-      <!--
-        x: front face of the body.
-        z: body_link centre is 0.3325 m above ground; 0.035 above the
-           chassis-bottom edge puts the sensor 0.10 m above ground.
-      -->
-      <origin xyz="${body_length/2.0} 0 ${-body_height/2.0 + 0.035}" rpy="0 0 0"/>
+      <!-- x: compartment front face; z: us_height_above_ground − wheel_radius -->
+      <origin xyz="${body_length/2.0} 0 ${us_height_above_ground - wheel_radius}" rpy="0 0 0"/>
     </joint>
 
   </xacro:macro>

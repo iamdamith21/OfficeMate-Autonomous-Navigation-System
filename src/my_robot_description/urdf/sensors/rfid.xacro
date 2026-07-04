@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<!--
+  MFRC522 RFID reader (blue board) on the top deck edge, beside the lidar.
+  Frame "rfid_link" — the read point for VERIFY_RFID in the mission FSM.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="rfid" params="">
+
+    <link name="rfid_link">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><box size="${rfid_l} ${rfid_w} ${rfid_h}"/></geometry>
+        <material name="rfid_blue"/>
+      </visual>
+    </link>
+
+    <!-- Front edge of the deck, offset to one side (as in the photo). -->
+    <joint name="rfid_joint" type="fixed">
+      <parent link="deck_link"/>
+      <child  link="rfid_link"/>
+      <origin xyz="${body_length/2.0 - rfid_l/2.0 - 0.02} ${body_width/4.0} ${deck_thickness/2.0 + rfid_h/2.0}"
+              rpy="0 0 0"/>
+    </joint>
+
+  </xacro:macro>
+
+</robot>

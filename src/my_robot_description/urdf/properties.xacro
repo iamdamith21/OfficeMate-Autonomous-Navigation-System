@@ -1,76 +1,78 @@
 <?xml version="1.0"?>
 <!--
-  Robot dimensional properties — single source of truth.
-  All distances in metres, masses in kg.
-
-  Coordinate convention (ROS REP-103):
-    X = forward,  Y = left,  Z = up
+  Robot dimensional properties — single source of truth (chassis v3, 4WD).
+  All distances in metres, masses in kg.  ROS REP-103: X fwd, Y left, Z up.
   base_link origin is at wheel-axis height above ground.
+
+  The enclosure is a multi-tier file-delivery cabinet (not a solid box):
+    tier 1  file compartment (grey) with a split double-door on the front
+    tier 2  open shelf framed by 4 corner posts (+ a mid shelf board)
+    tier 3  top deck (black board) carrying the lidar + RFID reader
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <!-- ── Math ── -->
   <xacro:property name="PI" value="3.14159265358979323846"/>
 
-  <!-- ── Body / Chassis ── -->
-  <!-- Outer envelope of the white enclosure box -->
-  <xacro:property name="body_length"  value="0.400"/>   <!-- X  40 cm -->
-  <xacro:property name="body_width"   value="0.300"/>   <!-- Y  30 cm -->
-  <!--
-    body_height chosen so that:
-      ground → base_link  = wheel_radius        = 0.065 m
-      base_link → body top = body_height        = 0.535 m
-      ground → body top                         = 0.600 m  ← "60 cm to lidar"
-  -->
-  <xacro:property name="body_height"  value="0.535"/>
-  <xacro:property name="chassis_thickness" value="0.020"/>  <!-- MDF/plywood platform -->
+  <!-- ── Footprint envelope ── -->
+  <xacro:property name="body_length"  value="0.400"/>   <!-- X 40 cm -->
+  <xacro:property name="body_width"   value="0.300"/>   <!-- Y 30 cm -->
+  <xacro:property name="panel_thickness" value="0.012"/>  <!-- plywood panels/boards -->
+  <xacro:property name="chassis_thickness" value="0.020"/>
+
+  <!-- ── Drive wheels (130 mm Ø, 60 mm wide) ── -->
+  <xacro:property name="wheel_radius" value="0.065"/>
+  <xacro:property name="wheel_width"  value="0.060"/>
+  <xacro:property name="wheel_y_offset" value="0.165"/> <!-- centreline → wheel centre -->
+  <!-- 4WD skid-steer half-wheelbase. PLACEHOLDER: set to real front↔rear axle / 2 -->
+  <xacro:property name="wheel_x_offset" value="0.150"/>
+
+  <!-- ── Ground clearance (wheels lowered) ── -->
+  <!-- Chassis/compartment underside sits this far above the ground.
+       Lower value = less clearance = body sits lower around the wheels. -->
+  <xacro:property name="ground_clearance" value="0.020"/>
+  <!-- Compartment underside relative to base_link (which is at wheel_radius). -->
+  <xacro:property name="compartment_z_bottom" value="${-(wheel_radius - ground_clearance)}"/> <!-- -0.045 -->
+
+  <!-- ── Tier heights (stack up from compartment underside) ── -->
+  <xacro:property name="compartment_height" value="0.300"/>
+  <xacro:property name="shelf_gap"          value="0.262"/>  <!-- open middle region -->
+  <xacro:property name="deck_thickness"     value="0.018"/>
+  <xacro:property name="post_size"          value="0.020"/>  <!-- corner post cross-section -->
+
+  <!-- Derived Z levels (from base_link) -->
+  <xacro:property name="compartment_top_z" value="${compartment_z_bottom + compartment_height}"/>       <!-- 0.255 -->
+  <xacro:property name="compartment_center_z" value="${compartment_z_bottom + compartment_height/2.0}"/> <!-- 0.105 -->
+  <xacro:property name="mid_shelf_z" value="${compartment_top_z + shelf_gap/2.0}"/>                      <!-- 0.386 -->
+  <xacro:property name="deck_bottom_z" value="${compartment_top_z + shelf_gap}"/>                        <!-- 0.517 -->
+  <xacro:property name="deck_center_z" value="${deck_bottom_z + deck_thickness/2.0}"/>                   <!-- 0.526 -->
+  <xacro:property name="deck_top_z" value="${deck_bottom_z + deck_thickness}"/>                          <!-- 0.535 → 0.600 from ground -->
+
+  <!-- ── Split double-door (front face, two panels) ── -->
+  <xacro:property name="door_height"    value="0.260"/>
+  <xacro:property name="door_width"     value="0.145"/>  <!-- each panel (Y) -->
+  <xacro:property name="door_thickness" value="0.012"/>
+
+  <!-- ── RFID reader (MFRC522 board) ── -->
+  <xacro:property name="rfid_l" value="0.060"/>
+  <xacro:property name="rfid_w" value="0.040"/>
+  <xacro:property name="rfid_h" value="0.008"/>
+
+  <!-- ── HC-SR04 ultrasonic "eyes" (twin transducers) ── -->
+  <xacro:property name="us_eye_radius" value="0.008"/>
+  <xacro:property name="us_eye_length" value="0.015"/>
+  <xacro:property name="us_eye_sep"    value="0.026"/>  <!-- centre-to-centre of the two eyes -->
+  <xacro:property name="us_height_above_ground" value="0.100"/>
+
+  <!-- ── LTME-02A lidar (70 mm Ø, 60 mm tall) ── -->
+  <xacro:property name="lidar_radius" value="0.035"/>
+  <xacro:property name="lidar_height" value="0.060"/>
 
   <!-- ── Masses ── -->
   <xacro:property name="chassis_mass" value="0.500"/>
-  <xacro:property name="body_mass"    value="3.000"/>
+  <xacro:property name="compartment_mass" value="2.000"/>
+  <xacro:property name="deck_mass"    value="0.400"/>
   <xacro:property name="wheel_mass"   value="0.200"/>
-  <xacro:property name="caster_mass"  value="0.050"/>
   <xacro:property name="lidar_mass"   value="0.200"/>
-
-  <!-- ── Drive Wheels (130 mm Ø, 60 mm wide) ── -->
-  <xacro:property name="wheel_radius" value="0.065"/>
-  <xacro:property name="wheel_width"  value="0.060"/>
-  <!--
-    Wheel joint Y position: place wheel centre just outside body edge.
-    body_width/2 + 15 mm clearance = 0.150 + 0.015 = 0.165 m
-  -->
-  <xacro:property name="wheel_y_offset" value="0.165"/>
-  <!--
-    4WD skid-steer: longitudinal half-wheelbase (front/rear axle from centre).
-    TODO: set to the real measured front↔rear axle spacing / 2. Placeholder
-    0.150 m puts the axles 300 mm apart (near the caster positions of the
-    previous chassis). Wheels sit at x = ±wheel_x_offset.
-  -->
-  <xacro:property name="wheel_x_offset" value="0.150"/>
-
-  <!-- ── Caster Wheels (50 mm Ø, 20 mm wide) ── -->
-  <xacro:property name="caster_radius" value="0.025"/>
-  <xacro:property name="caster_width"  value="0.020"/>
-  <!--
-    Caster joint Z from base_link: lower it so the caster touches ground.
-      caster centre height = caster_radius = 0.025 m from ground
-      base_link height     = wheel_radius  = 0.065 m from ground
-      delta_z = 0.025 − 0.065 = −0.040 m
-  -->
-  <xacro:property name="caster_z_offset" value="-0.040"/>
-  <!-- X positions along robot body (30 mm from front/rear edge) -->
-  <xacro:property name="caster_x_front"  value=" 0.170"/>
-  <xacro:property name="caster_x_rear"   value="-0.170"/>
-
-  <!-- ── RPLidar (70 mm Ø cylinder, 60 mm tall) ── -->
-  <xacro:property name="lidar_radius" value="0.035"/>
-  <xacro:property name="lidar_height" value="0.060"/>
-  <!--
-    Lidar joint is at the centre-top of the body (z = body_height from base_link).
-    The laser link origin is at the centre of the cylinder:
-      z from joint = lidar_height/2 = 0.030 m
-    So lidar centre above ground = 0.065 + 0.535 + 0.030 = 0.630 m
-  -->
-  <xacro:property name="lidar_z_from_base" value="${body_height}"/>  <!-- 0.535 m -->
 
 </robot>
