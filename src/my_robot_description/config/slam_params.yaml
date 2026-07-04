@@ -1,3 +1,8 @@
+# SLAM Toolbox — async online mapping with Ceres pose-graph optimization.
+# Tuned for the LitraTech LTME-02A (270° FoV, 30 Hz). The 270° FoV has a blind
+# rear arc and is feature-poorer than a 360° lidar, so loop closure is made
+# strict (few false loops) and the graph optimization uses a robust Huber loss
+# so a single bad loop closure can't warp the whole map.
 slam_toolbox:
   ros__parameters:
     solver_plugin: solver_plugins::CeresSolver
@@ -5,7 +10,7 @@ slam_toolbox:
     ceres_preconditioner: SCHUR_JACOBI
     ceres_trust_strategy: LEVENBERG_MARQUARDT
     ceres_dogleg_type: TRADITIONAL_DOGLEG
-    ceres_loss_function: None
+    ceres_loss_function: HuberLoss      # robust pose-graph optimization
 
     odom_frame: odom
     map_frame: map
@@ -26,18 +31,22 @@ slam_toolbox:
 
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.05
-    minimum_travel_heading: 0.1
-    scan_buffer_size: 10
+    # Leaner keyframe graph (was 0.05/0.1): fewer nodes → faster optimization
+    # on the Pi, still dense enough for a small indoor robot.
+    minimum_travel_distance: 0.10
+    minimum_travel_heading: 0.15
+    scan_buffer_size: 15                 # more matching context (was 10)
     scan_buffer_maximum_scan_distance: 10.0
-    link_match_minimum_response_fine: 0.1
+    link_match_minimum_response_fine: 0.12
     link_scan_maximum_distance: 1.5
-    loop_search_maximum_distance: 3.0
+    # Loop closure (pose-graph optimization trigger): search a bit wider but
+    # accept only high-confidence matches so the 270° FoV can't spawn false loops.
+    loop_search_maximum_distance: 4.0    # was 3.0
     do_loop_closing: true
     loop_match_minimum_chain_size: 10
     loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.35
-    loop_match_minimum_response_fine: 0.45
+    loop_match_minimum_response_coarse: 0.40   # was 0.35
+    loop_match_minimum_response_fine: 0.50     # was 0.45 (stricter)
 
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01
