@@ -1,33 +1,45 @@
 <?xml version="1.0"?>
 <!--
-  HC-SR04 ultrasonic on the compartment front face, ~10 cm above ground,
-  pointing forward (+X). Modelled as the sensor's twin transducers — two
-  grey "eyes". Frame "ultrasonic_link" (frame_id of /ultrasonic/range) sits
-  at the pair centre with +X = measurement direction.
+  HC-SR04 ultrasonic on the front of the bottom box, ~10 cm above ground,
+  facing forward (+X). Modelled like the real module: a blue PCB, two black
+  cylindrical transducers ("eyes") protruding forward, and a silver crystal
+  can between them. Frame "ultrasonic_link" (frame_id of /ultrasonic/range)
+  sits on the board with +X = measurement direction.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:macro name="ultrasonic" params="">
 
     <link name="ultrasonic_link">
-      <!-- left eye -->
+      <!-- blue PCB -->
       <visual>
-        <origin xyz="0 ${us_eye_sep/2.0} 0" rpy="0 ${PI/2.0} 0"/>
-        <geometry><cylinder radius="${us_eye_radius}" length="${us_eye_length}"/></geometry>
-        <material name="ultrasonic_grey"/>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <geometry><box size="${us_pcb_t} ${us_pcb_w} ${us_pcb_h}"/></geometry>
+        <material name="us_pcb_blue"/>
       </visual>
-      <!-- right eye -->
+      <!-- left transducer (black cylinder, protruding forward) -->
       <visual>
-        <origin xyz="0 ${-us_eye_sep/2.0} 0" rpy="0 ${PI/2.0} 0"/>
-        <geometry><cylinder radius="${us_eye_radius}" length="${us_eye_length}"/></geometry>
-        <material name="ultrasonic_grey"/>
+        <origin xyz="${us_tx_length/2.0} ${us_tx_sep/2.0} 0" rpy="0 ${PI/2.0} 0"/>
+        <geometry><cylinder radius="${us_tx_radius}" length="${us_tx_length}"/></geometry>
+        <material name="us_transducer_black"/>
+      </visual>
+      <!-- right transducer -->
+      <visual>
+        <origin xyz="${us_tx_length/2.0} ${-us_tx_sep/2.0} 0" rpy="0 ${PI/2.0} 0"/>
+        <geometry><cylinder radius="${us_tx_radius}" length="${us_tx_length}"/></geometry>
+        <material name="us_transducer_black"/>
+      </visual>
+      <!-- silver crystal oscillator between the transducers -->
+      <visual>
+        <origin xyz="${us_pcb_t} 0 0" rpy="0 0 0"/>
+        <geometry><box size="0.005 0.010 0.005"/></geometry>
+        <material name="crystal_silver"/>
       </visual>
     </link>
 
     <joint name="ultrasonic_joint" type="fixed">
       <parent link="base_link"/>
       <child  link="ultrasonic_link"/>
-      <!-- x: compartment front face; z: us_height_above_ground − wheel_radius -->
       <origin xyz="${body_length/2.0} 0 ${us_height_above_ground - wheel_radius}" rpy="0 0 0"/>
     </joint>
 

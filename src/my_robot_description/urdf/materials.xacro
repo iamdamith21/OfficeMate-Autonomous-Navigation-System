@@ -2,12 +2,12 @@
 <!-- Named materials for RViz visualisation (chassis v3 palette). -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- Enclosure / structure = black -->
+  <!-- Enclosure / bottom box / structure = black -->
   <material name="enclosure_black">
     <color rgba="0.08 0.08 0.09 1.0"/>
   </material>
 
-  <!-- File compartment = grey -->
+  <!-- File compartment (middle tier) + split doors = grey -->
   <material name="compartment_grey">
     <color rgba="0.55 0.55 0.57 1.0"/>
   </material>
@@ -25,9 +25,15 @@
     <color rgba="0.10 0.35 0.85 1.0"/>
   </material>
 
-  <!-- Ultrasonic "eyes" = grey -->
-  <material name="ultrasonic_grey">
-    <color rgba="0.60 0.60 0.62 1.0"/>
+  <!-- HC-SR04: blue PCB, black transducers, silver crystal -->
+  <material name="us_pcb_blue">
+    <color rgba="0.12 0.45 0.75 1.0"/>
+  </material>
+  <material name="us_transducer_black">
+    <color rgba="0.05 0.05 0.05 1.0"/>
+  </material>
+  <material name="crystal_silver">
+    <color rgba="0.75 0.76 0.78 1.0"/>
   </material>
 
   <!-- Wheels = black, hub accent -->

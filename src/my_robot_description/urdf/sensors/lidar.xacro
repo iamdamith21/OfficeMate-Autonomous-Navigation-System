@@ -1,10 +1,9 @@
 <?xml version="1.0"?>
 <!--
   LTME-02A lidar on the top deck. Frame "laser" (driver frame_id).
-  FIXED joint: the frame does not rotate in real use (driver outputs
-  de-rotated scans) so base->laser is on /tf_static — a continuous joint
-  would ride dynamic /tf at the joint-state rate and cause the 30 Hz scans
-  to be dropped by SLAM/Nav2.
+  FIXED joint (parented straight to base_link since the deck is not its own
+  frame): base->laser is on /tf_static — a moving joint would ride dynamic
+  /tf at the joint-state rate and the 30 Hz scans would be dropped by SLAM.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
@@ -23,11 +22,11 @@
       <xacro:cylinder_inertia_z m="${lidar_mass}" r="${lidar_radius}" h="${lidar_height}"/>
     </link>
 
-    <!-- Mounted on the deck top surface, centred (270° FOV faces forward). -->
+    <!-- On the deck top surface, centred (270° FOV faces forward). -->
     <joint name="laser_joint" type="fixed">
-      <parent link="deck_link"/>
+      <parent link="base_link"/>
       <child  link="laser"/>
-      <origin xyz="0 0 ${deck_thickness/2.0}" rpy="0 0 0"/>
+      <origin xyz="0 0 ${deck_top_z}" rpy="0 0 0"/>
     </joint>
 
   </xacro:macro>
