@@ -27,14 +27,15 @@ ekf_filter_node:
     base_link_frame: base_footprint
     world_frame: odom
 
-    # rf2o laser odometry — take LINEAR velocity (vx) only. Its yaw-rate (vyaw)
-    # is unreliable with the LTME-02A's 270° FoV (blind rear arc weakens
-    # rotation estimation), so yaw-rate comes from the gyro instead (imu0).
+    # rf2o laser odometry — take linear velocity (vx) AND yaw-rate (vyaw).
+    # rf2o supplies rotation from scan matching so the robot turns correctly
+    # even when the Arduino/gyro is not connected; when the gyro IS available
+    # the EKF fuses both (imu0 also provides vyaw) for a better yaw estimate.
     odom0: /odom_rf2o
     odom0_config: [false, false, false,
                    false, false, false,
                    true,  false, false,
-                   false, false, false,
+                   false, false, true,
                    false, false, false]
     odom0_differential: false
     odom0_queue_size: 5

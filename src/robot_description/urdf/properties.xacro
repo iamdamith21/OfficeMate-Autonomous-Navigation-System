@@ -68,10 +68,10 @@
   <xacro:property name="door_width"     value="0.098"/>   <!-- each panel (Y), ~comp_width/2 -->
   <xacro:property name="door_thickness" value="0.012"/>
 
-  <!-- ── RFID reader (MFRC522) — centred on the deck ── -->
+  <!-- ── RFID reader (blue box, 6 cm × 3 cm × 1 cm) — centred on the deck ── -->
   <xacro:property name="rfid_l" value="0.060"/>
-  <xacro:property name="rfid_w" value="0.040"/>
-  <xacro:property name="rfid_h" value="0.008"/>
+  <xacro:property name="rfid_w" value="0.030"/>
+  <xacro:property name="rfid_h" value="0.010"/>
   <xacro:property name="rfid_x" value="${body_length/2.0 - rfid_l/2.0 - 0.03}"/>
 
   <!-- ── HC-SR04 ultrasonic (blue PCB + 2 black transducers + silver crystal) ── -->
