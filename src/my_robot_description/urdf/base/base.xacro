@@ -1,24 +1,23 @@
 <?xml version="1.0"?>
 <!--
-  Enclosure structure (chassis v3): a 3-tier file-delivery cabinet.
+  Enclosure structure (chassis v3) — matches the real build.
 
-  ALL static geometry is carried as multiple <visual> elements on base_link,
-  so it adds NO extra TF frames. Only the two doors (which move) get their own
-  links/frames.
+  All static geometry is carried as multiple <visual> elements on base_link,
+  so it adds NO extra TF frames. Only the two doors (which move) get frames.
 
-    tier 1  BLACK solid box     (bottom, no doors)
-    tier 2  GREY file compartment (hollow, open front) + split double-door
-    tier 3  BLACK deck board     (top surface; lidar + centred RFID sit on it)
+    tier 1  BLACK enclosure (full footprint, largest box)
+    (gap)   open — 4 GREY corner bars visible
+    tier 2  GREY file compartment (SMALLER, raised, hollow) + split double-door
+    tier 3  BLACK deck (full footprint, overhangs) — lidar + centred blue RFID
 
   TF frames from this file: base_footprint, base_link, door_left_link,
-  door_right_link.  (laser / imu_link / ultrasonic_link / wheels come from the
-  sensor & wheel macros.)
+  door_right_link.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <xacro:macro name="base" params="">
 
-    <!-- ── base_footprint (REP-105 ground projection) ── -->
+    <!-- ── base_footprint ── -->
     <link name="base_footprint"/>
     <joint name="base_joint" type="fixed">
       <parent link="base_footprint"/>
@@ -34,39 +33,55 @@
         <geometry><box size="${body_length} ${body_width} ${chassis_thickness}"/></geometry>
         <material name="chassis_grey"/></visual>
 
-      <!-- tier 1: solid BLACK bottom box -->
-      <visual><origin xyz="0 0 ${bottom_black_center_z}"/>
-        <geometry><box size="${body_length} ${body_width} ${bottom_black_h}"/></geometry>
+      <!-- tier 1: BLACK bottom enclosure (full footprint, largest) -->
+      <visual><origin xyz="0 0 ${enclosure_center_z}"/>
+        <geometry><box size="${body_length} ${body_width} ${enclosure_h}"/></geometry>
         <material name="enclosure_black"/></visual>
 
-      <!-- tier 2: GREY file compartment — 5 panels, front open for the doors -->
-      <visual><origin xyz="0 0 ${compartment_center_z - compartment_h/2.0}"/>
-        <geometry><box size="${body_length} ${body_width} ${panel_thickness}"/></geometry>
-        <material name="compartment_grey"/></visual>                       <!-- floor -->
-      <visual><origin xyz="0 0 ${compartment_center_z + compartment_h/2.0}"/>
-        <geometry><box size="${body_length} ${body_width} ${panel_thickness}"/></geometry>
-        <material name="compartment_grey"/></visual>                       <!-- ceiling -->
-      <visual><origin xyz="${-body_length/2.0} 0 ${compartment_center_z}"/>
-        <geometry><box size="${panel_thickness} ${body_width} ${compartment_h}"/></geometry>
-        <material name="compartment_grey"/></visual>                       <!-- back -->
-      <visual><origin xyz="0 ${body_width/2.0} ${compartment_center_z}"/>
-        <geometry><box size="${body_length} ${panel_thickness} ${compartment_h}"/></geometry>
-        <material name="compartment_grey"/></visual>                       <!-- left -->
-      <visual><origin xyz="0 ${-body_width/2.0} ${compartment_center_z}"/>
-        <geometry><box size="${body_length} ${panel_thickness} ${compartment_h}"/></geometry>
-        <material name="compartment_grey"/></visual>                       <!-- right -->
+      <!-- 4 GREY corner bars (outer corners, full height enclosure→deck) -->
+      <xacro:property name="bx" value="${body_length/2.0 - bar_size/2.0}"/>
+      <xacro:property name="by" value="${body_width/2.0 - bar_size/2.0}"/>
+      <visual><origin xyz="${bx} ${by} ${bar_center_z}"/>
+        <geometry><box size="${bar_size} ${bar_size} ${bar_h}"/></geometry>
+        <material name="bar_grey"/></visual>
+      <visual><origin xyz="${bx} ${-by} ${bar_center_z}"/>
+        <geometry><box size="${bar_size} ${bar_size} ${bar_h}"/></geometry>
+        <material name="bar_grey"/></visual>
+      <visual><origin xyz="${-bx} ${by} ${bar_center_z}"/>
+        <geometry><box size="${bar_size} ${bar_size} ${bar_h}"/></geometry>
+        <material name="bar_grey"/></visual>
+      <visual><origin xyz="${-bx} ${-by} ${bar_center_z}"/>
+        <geometry><box size="${bar_size} ${bar_size} ${bar_h}"/></geometry>
+        <material name="bar_grey"/></visual>
 
-      <!-- tier 3: BLACK deck board (top surface) -->
+      <!-- tier 2: GREY file compartment (SMALLER) — 5 panels, front open -->
+      <visual><origin xyz="0 0 ${comp_bottom_z}"/>
+        <geometry><box size="${comp_length} ${comp_width} ${panel_thickness}"/></geometry>
+        <material name="compartment_grey"/></visual>                        <!-- floor -->
+      <visual><origin xyz="0 0 ${comp_top_z}"/>
+        <geometry><box size="${comp_length} ${comp_width} ${panel_thickness}"/></geometry>
+        <material name="compartment_grey"/></visual>                        <!-- ceiling -->
+      <visual><origin xyz="${-comp_length/2.0} 0 ${comp_center_z}"/>
+        <geometry><box size="${panel_thickness} ${comp_width} ${comp_h}"/></geometry>
+        <material name="compartment_grey"/></visual>                        <!-- back -->
+      <visual><origin xyz="0 ${comp_width/2.0} ${comp_center_z}"/>
+        <geometry><box size="${comp_length} ${panel_thickness} ${comp_h}"/></geometry>
+        <material name="compartment_grey"/></visual>                        <!-- left -->
+      <visual><origin xyz="0 ${-comp_width/2.0} ${comp_center_z}"/>
+        <geometry><box size="${comp_length} ${panel_thickness} ${comp_h}"/></geometry>
+        <material name="compartment_grey"/></visual>                        <!-- right -->
+
+      <!-- tier 3: BLACK deck board (full footprint, overhangs) -->
       <visual><origin xyz="0 0 ${deck_center_z}"/>
         <geometry><box size="${body_length} ${body_width} ${deck_h}"/></geometry>
         <material name="deck_black"/></visual>
 
-      <!-- RFID reader (blue), centred on the deck front-edge line -->
+      <!-- RFID reader (blue), centred on the deck -->
       <visual><origin xyz="${rfid_x} 0 ${deck_top_z + rfid_h/2.0}"/>
         <geometry><box size="${rfid_l} ${rfid_w} ${rfid_h}"/></geometry>
         <material name="rfid_blue"/></visual>
 
-      <collision><origin xyz="0 0 ${compartment_center_z}"/>
+      <collision><origin xyz="0 0 ${(struct_bottom_z + deck_top_z)/2.0}"/>
         <geometry><box size="${body_length} ${body_width} ${deck_top_z - struct_bottom_z}"/></geometry>
       </collision>
       <xacro:box_inertia m="${body_mass}" l="${body_length}" w="${body_width}" h="${deck_top_z - struct_bottom_z}"/>
@@ -76,7 +91,7 @@
     <joint name="door_left_joint" type="revolute">
       <parent link="base_link"/>
       <child  link="door_left_link"/>
-      <origin xyz="${body_length/2.0} ${body_width/2.0} ${compartment_center_z}" rpy="0 0 0"/>
+      <origin xyz="${comp_length/2.0} ${comp_width/2.0} ${comp_center_z}" rpy="0 0 0"/>
       <axis xyz="0 0 1"/>
       <limit lower="0.0" upper="1.571" effort="2.0" velocity="2.0"/>
     </joint>
@@ -89,7 +104,7 @@
     <joint name="door_right_joint" type="revolute">
       <parent link="base_link"/>
       <child  link="door_right_link"/>
-      <origin xyz="${body_length/2.0} ${-body_width/2.0} ${compartment_center_z}" rpy="0 0 0"/>
+      <origin xyz="${comp_length/2.0} ${-comp_width/2.0} ${comp_center_z}" rpy="0 0 0"/>
       <axis xyz="0 0 1"/>
       <limit lower="-1.571" upper="0.0" effort="2.0" velocity="2.0"/>
     </joint>

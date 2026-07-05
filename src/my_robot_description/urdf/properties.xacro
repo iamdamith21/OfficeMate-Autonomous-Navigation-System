@@ -4,24 +4,27 @@
   All distances in metres, masses in kg.  ROS REP-103: X fwd, Y left, Z up.
   base_link origin is at wheel-axis height above ground.
 
-  Enclosure (bottom → top):
-    tier 1  solid BLACK box (no doors)
-    tier 2  GREY file compartment (hollow) with a split double-door on the front
-    tier 3  BLACK top deck (surface) carrying the lidar + centred RFID reader
+  Enclosure layout (bottom → top), matching the real build:
+    tier 1  BLACK enclosure  — the largest box (full footprint)
+    (gap)   open, 4 GREY corner bars visible
+    tier 2  GREY file compartment — SMALLER footprint, raised & separated from
+            the enclosure, with a split double-door on the front
+    tier 3  BLACK top deck (overhangs) — carries lidar + centred blue RFID
+  The 4 grey bars run the full height (enclosure top → deck) at the outer
+  corners, so they are visible around the smaller compartment.
 
   Minimal TF: all static structure lives on base_link (multiple visuals) so it
-  produces NO extra TF frames. Only functional links get their own frame:
-  base_footprint, base_link, laser, imu_link, ultrasonic_link, the 4 wheels,
-  and the 2 (moving) doors.
+  produces NO extra frames. Only functional links get a frame: base_footprint,
+  base_link, laser, imu_link, ultrasonic_link, the 4 wheels, the 2 doors.
 -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
   <!-- ── Math ── -->
   <xacro:property name="PI" value="3.14159265358979323846"/>
 
-  <!-- ── Footprint envelope ── -->
-  <xacro:property name="body_length"  value="0.400"/>   <!-- X 40 cm -->
-  <xacro:property name="body_width"   value="0.300"/>   <!-- Y 30 cm -->
+  <!-- ── Full footprint (bottom enclosure + top deck) ── -->
+  <xacro:property name="body_length"  value="0.400"/>   <!-- X -->
+  <xacro:property name="body_width"   value="0.300"/>   <!-- Y -->
   <xacro:property name="panel_thickness" value="0.012"/>
   <xacro:property name="chassis_thickness" value="0.020"/>
 
@@ -36,37 +39,48 @@
   <xacro:property name="ground_clearance" value="0.020"/>
   <xacro:property name="struct_bottom_z" value="${-(wheel_radius - ground_clearance)}"/> <!-- -0.045 -->
 
-  <!-- ── Tier heights (stack up from struct_bottom_z) ── -->
-  <xacro:property name="bottom_black_h" value="0.245"/>
-  <xacro:property name="compartment_h"  value="0.317"/>   <!-- grey file compartment -->
-  <xacro:property name="deck_h"         value="0.018"/>
+  <!-- ── Tier 1: BLACK bottom enclosure (full footprint) ── -->
+  <xacro:property name="enclosure_h" value="0.245"/>
+  <xacro:property name="enclosure_center_z" value="${struct_bottom_z + enclosure_h/2.0}"/>  <!-- 0.0775 -->
+  <xacro:property name="enclosure_top_z"    value="${struct_bottom_z + enclosure_h}"/>       <!-- 0.200 -->
 
-  <!-- Derived Z centres/levels (from base_link) -->
-  <xacro:property name="bottom_black_center_z" value="${struct_bottom_z + bottom_black_h/2.0}"/>          <!-- 0.0775 -->
-  <xacro:property name="bottom_black_top_z"    value="${struct_bottom_z + bottom_black_h}"/>              <!-- 0.200 -->
-  <xacro:property name="compartment_center_z"  value="${bottom_black_top_z + compartment_h/2.0}"/>        <!-- 0.3585 -->
-  <xacro:property name="compartment_top_z"     value="${bottom_black_top_z + compartment_h}"/>            <!-- 0.517 -->
-  <xacro:property name="deck_center_z"         value="${compartment_top_z + deck_h/2.0}"/>                <!-- 0.526 -->
-  <xacro:property name="deck_top_z"            value="${compartment_top_z + deck_h}"/>                    <!-- 0.535 → 0.600 ground -->
+  <!-- ── Tier 3: BLACK top deck (full footprint, overhangs) ── -->
+  <xacro:property name="deck_h"        value="0.018"/>
+  <xacro:property name="deck_top_z"    value="0.535"/>                        <!-- 0.600 from ground -->
+  <xacro:property name="deck_bottom_z" value="${deck_top_z - deck_h}"/>       <!-- 0.517 -->
+  <xacro:property name="deck_center_z" value="${deck_top_z - deck_h/2.0}"/>   <!-- 0.526 -->
 
-  <!-- ── Split double-door (front of the GREY middle compartment) ── -->
-  <xacro:property name="door_height"    value="0.280"/>
-  <xacro:property name="door_width"     value="0.145"/>   <!-- each panel (Y) -->
+  <!-- ── Grey corner bars (full height, outer corners) ── -->
+  <xacro:property name="bar_size"     value="0.020"/>
+  <xacro:property name="bar_h"        value="${deck_bottom_z - enclosure_top_z}"/>            <!-- 0.317 -->
+  <xacro:property name="bar_center_z" value="${(enclosure_top_z + deck_bottom_z)/2.0}"/>      <!-- 0.3585 -->
+
+  <!-- ── Tier 2: GREY file compartment (SMALLER, raised, split doors) ── -->
+  <xacro:property name="comp_length" value="0.280"/>   <!-- < body_length -->
+  <xacro:property name="comp_width"  value="0.200"/>   <!-- < body_width -->
+  <xacro:property name="comp_h"      value="0.200"/>
+  <xacro:property name="comp_top_z"    value="${deck_bottom_z}"/>                 <!-- ceiling touches deck: 0.517 -->
+  <xacro:property name="comp_center_z" value="${comp_top_z - comp_h/2.0}"/>       <!-- 0.417 -->
+  <xacro:property name="comp_bottom_z" value="${comp_top_z - comp_h}"/>           <!-- 0.317; open gap below to 0.200 -->
+
+  <!-- ── Split double-door (front of the GREY compartment) ── -->
+  <xacro:property name="door_height"    value="0.160"/>
+  <xacro:property name="door_width"     value="0.098"/>   <!-- each panel (Y), ~comp_width/2 -->
   <xacro:property name="door_thickness" value="0.012"/>
 
-  <!-- ── RFID reader (MFRC522) — centred on the deck front-edge line ── -->
+  <!-- ── RFID reader (MFRC522) — centred on the deck ── -->
   <xacro:property name="rfid_l" value="0.060"/>
   <xacro:property name="rfid_w" value="0.040"/>
   <xacro:property name="rfid_h" value="0.008"/>
-  <xacro:property name="rfid_x" value="${body_length/2.0 - rfid_l/2.0 - 0.02}"/>  <!-- front-edge line -->
+  <xacro:property name="rfid_x" value="${body_length/2.0 - rfid_l/2.0 - 0.03}"/>
 
   <!-- ── HC-SR04 ultrasonic (blue PCB + 2 black transducers + silver crystal) ── -->
-  <xacro:property name="us_pcb_w"    value="0.045"/>   <!-- board Y -->
-  <xacro:property name="us_pcb_h"    value="0.020"/>   <!-- board Z -->
-  <xacro:property name="us_pcb_t"    value="0.0015"/>  <!-- board X (thin) -->
-  <xacro:property name="us_tx_radius" value="0.008"/>  <!-- transducer can -->
+  <xacro:property name="us_pcb_w"    value="0.045"/>
+  <xacro:property name="us_pcb_h"    value="0.020"/>
+  <xacro:property name="us_pcb_t"    value="0.0015"/>
+  <xacro:property name="us_tx_radius" value="0.008"/>
   <xacro:property name="us_tx_length" value="0.012"/>
-  <xacro:property name="us_tx_sep"    value="0.026"/>  <!-- centre-to-centre -->
+  <xacro:property name="us_tx_sep"    value="0.026"/>
   <xacro:property name="us_height_above_ground" value="0.100"/>
 
   <!-- ── LTME-02A lidar (70 mm Ø, 60 mm tall) ── -->

@@ -2,22 +2,25 @@
 <!-- Named materials for RViz visualisation (chassis v3 palette). -->
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- Enclosure / bottom box / structure = black -->
+  <!-- Bottom enclosure + deck + lidar = black -->
   <material name="enclosure_black">
     <color rgba="0.08 0.08 0.09 1.0"/>
   </material>
-
-  <!-- File compartment (middle tier) + split doors = grey -->
-  <material name="compartment_grey">
-    <color rgba="0.55 0.55 0.57 1.0"/>
-  </material>
-
-  <!-- Top deck surface + lidar = black -->
   <material name="deck_black">
     <color rgba="0.10 0.10 0.11 1.0"/>
   </material>
   <material name="lidar_black">
     <color rgba="0.06 0.06 0.07 1.0"/>
+  </material>
+
+  <!-- File compartment + split doors = grey -->
+  <material name="compartment_grey">
+    <color rgba="0.55 0.55 0.57 1.0"/>
+  </material>
+
+  <!-- Corner bars = grey (aluminium) -->
+  <material name="bar_grey">
+    <color rgba="0.72 0.73 0.75 1.0"/>
   </material>
 
   <!-- RFID reader = blue -->
@@ -36,12 +39,12 @@
     <color rgba="0.75 0.76 0.78 1.0"/>
   </material>
 
-  <!-- Wheels = black, hub accent -->
+  <!-- Wheels = black tyre, chrome/silver hub -->
   <material name="wheel_black">
     <color rgba="0.10 0.10 0.10 1.0"/>
   </material>
-  <material name="wheel_hub_blue">
-    <color rgba="0.20 0.20 0.80 1.0"/>
+  <material name="wheel_hub_silver">
+    <color rgba="0.80 0.82 0.85 1.0"/>
   </material>
 
   <!-- Chassis plate (hidden, low) -->

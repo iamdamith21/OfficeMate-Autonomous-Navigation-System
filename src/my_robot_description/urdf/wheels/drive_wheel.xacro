@@ -34,7 +34,7 @@
         <geometry>
           <cylinder radius="${wheel_radius * 0.55}" length="${wheel_width * 1.05}"/>
         </geometry>
-        <material name="wheel_hub_blue"/>
+        <material name="wheel_hub_silver"/>
       </visual>
 
       <collision>
