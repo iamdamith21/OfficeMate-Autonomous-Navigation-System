@@ -14,11 +14,11 @@ Pipeline:
                 → arduino_bridge (started by bringup) → motors
 
 Run on Pi:
-  ros2 launch my_robot_description navigation.launch.py \
+  ros2 launch robot_navigation navigation.launch.py \
       map:=~/maps/my_map.yaml [use_keepout_filter:=true]
 
 RViz on laptop (ROS_DOMAIN_ID=10):
-  rviz2 -d ~/ros2_ws/src/my_robot_description/rviz/mapping.rviz
+  rviz2 -d ~/ros2_ws/src/robot_description/rviz/mapping.rviz
   All displays (RobotModel, TF, LaserScan, Odometry, Map) are pre-configured.
   Use "2D Pose Estimate" to init AMCL, then "2D Goal Pose" to navigate.
   (The Pose/SLAM-graph displays stay empty here — those are slam_toolbox-only
@@ -35,9 +35,9 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg            = FindPackageShare('my_robot_description')
-    nav2_params    = PathJoinSubstitution([pkg, 'config', 'nav2_params.yaml'])
-    cf_params      = PathJoinSubstitution([pkg, 'config', 'costmap_filter_params.yaml'])
+    pkg            = FindPackageShare("robot_navigation")
+    nav2_params    = PathJoinSubstitution([pkg, "nav2", "nav2_params.yaml"])
+    cf_params      = PathJoinSubstitution([pkg, "nav2", "costmap_filter_params.yaml"])
     bt_xml         = PathJoinSubstitution([pkg, 'behavior_trees',
                                            'navigate_w_replanning_and_recovery.xml'])
     default_map    = os.path.join(os.path.expanduser('~'), 'maps', 'my_map.yaml')
