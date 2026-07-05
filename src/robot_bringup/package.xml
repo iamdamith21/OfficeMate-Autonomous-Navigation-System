@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robot_bringup</name>
+  <version>3.0.0</version>
+  <description>Real-hardware bringup: robot_state_publisher, rf2o + EKF odometry, LiDAR driver, and the Arduino bridge, composed into one launch.</description>
+  <maintainer email="cldac@buyjustnow.com">damith</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>robot_description</exec_depend>
+  <exec_depend>hardware_bridge</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
+  <exec_depend>robot_localization</exec_depend>
+  <exec_depend>rf2o_laser_odometry</exec_depend>
+  <exec_depend>ltme_node</exec_depend>
+  <exec_depend>sllidar_ros2</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

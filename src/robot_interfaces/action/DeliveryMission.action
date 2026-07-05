@@ -1,0 +1,13 @@
+# Goal — request a file delivery
+string mission_id
+string recipient_id                  # RFID tag expected at the dropoff
+geometry_msgs/PoseStamped pickup_pose
+geometry_msgs/PoseStamped dropoff_pose
+---
+# Result
+bool success
+string message
+---
+# Feedback — current FSM state
+uint8 state
+string state_name

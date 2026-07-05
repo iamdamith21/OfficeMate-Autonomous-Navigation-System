@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robot_mapping</name>
+  <version>3.0.0</version>
+  <description>SLAM mapping (slam_toolbox pose-graph), map saving, and the room_mapper coverage helper.</description>
+  <maintainer email="cldac@buyjustnow.com">damith</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>robot_bringup</exec_depend>
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

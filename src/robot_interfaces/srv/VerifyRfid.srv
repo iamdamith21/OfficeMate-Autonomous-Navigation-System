@@ -1,0 +1,5 @@
+string expected_tag    # expected RFID tag id ("" = accept any tag)
+float32 timeout        # seconds to wait for a tag
+---
+bool matched
+string tag_id
