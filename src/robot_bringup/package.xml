@@ -15,7 +15,6 @@
   <exec_depend>robot_localization</exec_depend>
   <exec_depend>rf2o_laser_odometry</exec_depend>
   <exec_depend>ltme_node</exec_depend>
-  <exec_depend>sllidar_ros2</exec_depend>
   <exec_depend>xacro</exec_depend>
 
   <export>

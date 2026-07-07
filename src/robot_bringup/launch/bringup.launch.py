@@ -2,27 +2,22 @@
 """
 bringup.launch.py — real-hardware bringup (Pi only).
 
-Startup sequence:
-  t=0s  RSP + JSP (source_list) + rf2o + EKF + arduino_bridge
-        + wheel_joint_pub start
-  lidar:=rplidar (default):
-    t=2s  STOP+RESET sent to /dev/sllidar (flush stale serial data)
-    t=9s  sllidar_node starts (respawn=True for resilience)
-  lidar:=ltme:
-    t=0s  ltme_node starts (LitraTech LTME-02A over Ethernet; respawn=True).
-          Requires eth0 on the lidar subnet (static 192.168.10.100/24,
-          lidar at 192.168.10.160). No serial reset dance needed.
+Starts, at t=0s:
+  RSP + JSP (source_list) + rf2o + EKF + arduino_bridge + wheel_joint_pub
+  + the LTME-02A LiDAR driver.
 
-Both LiDARs publish sensor_msgs/LaserScan on /scan in the 'laser' frame, so
-rf2o odometry and slam_toolbox are agnostic to which one is used.
+LiDAR: LitraTech LTME-02A over Ethernet (LDCP protocol, respawn=True).
+Requires eth0 on the lidar subnet (static 192.168.10.100/24, lidar at
+192.168.10.160). The driver has its own connection-retry loop, so no serial
+reset dance is needed. It publishes sensor_msgs/LaserScan on /scan in the
+'laser' frame.
 
 Odometry: rf2o estimates velocities from the lidar scan; the EKF
-(robot_localization, config/ekf.yaml) fuses them with the MPU9250 gyro
+(robot_localization, config/ekf.yaml) fuses them with the MPU6050 gyro
 from arduino_bridge and owns the odom->base_footprint TF. Fused
 output: /odometry/filtered.
 
 Launch arguments:
-  lidar       : which LiDAR to bring up — 'rplidar' (default) | 'ltme'.
   arduino_dev : Arduino serial device (default /dev/arduino). The bridge
                 retries every 3 s if the board is unplugged.
   ltme_address: LTME-02A IP[:port] (default 192.168.10.160).
@@ -30,13 +25,7 @@ Launch arguments:
 TF tree:
   odom -> base_footprint -> base_link -> body_link -> laser
                                       -> imu_link / ultrasonic_link
-                                      -> left_wheel_link
-                                      -> right_wheel_link
-                                      -> (casters)
-
-Note on laser_joint: sllidar_ros2 de-rotates scan data internally so
-the laser frame must stay at 0 rad — spinning it would misalign the
-scan in RViz.
+                                      -> left/right wheel links
 
 Run on Pi:
   ros2 launch robot_bringup bringup.launch.py
@@ -46,25 +35,12 @@ On laptop (ROS_DOMAIN_ID=10):
 """
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
-from launch.conditions import IfCondition
-from launch.substitutions import (Command, LaunchConfiguration,
-                                  PathJoinSubstitution, PythonExpression)
+from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
-
-_RESET_CMD = (
-    'import os,time,termios;'
-    'fd=os.open("/dev/sllidar",os.O_RDWR|os.O_NOCTTY|os.O_NONBLOCK);'
-    'termios.tcflush(fd,termios.TCIOFLUSH);'
-    'os.write(fd,bytes([0xa5,0x25]));time.sleep(0.05);'
-    'os.write(fd,bytes([0xa5,0x40]));time.sleep(2.0);'
-    'termios.tcflush(fd,termios.TCIFLUSH);'
-    'os.close(fd);time.sleep(0.3);'
-    'print("LiDAR reset OK")'
-)
 
 _WHEEL_PUB = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -92,7 +68,7 @@ def generate_launch_description():
     )
 
     # 2. Joint state publisher — merges wheel_joint_states (from
-    #    wheel_joint_pub) with 0.0 defaults for casters and laser.
+    #    wheel_joint_pub) with 0.0 defaults for the remaining joints.
     jsp_node = Node(
         package='joint_state_publisher',
         executable='joint_state_publisher',
@@ -125,7 +101,7 @@ def generate_launch_description():
         output='screen',
     )
 
-    # 5. EKF — fuses rf2o velocities with the MPU9250 gyro; publishes
+    # 5. EKF — fuses rf2o velocities with the MPU6050 gyro; publishes
     #    odom->base_footprint TF and /odometry/filtered.
     ekf_node = Node(
         package='robot_localization',
@@ -136,7 +112,7 @@ def generate_launch_description():
     )
 
     # 6. Arduino bridge — motors, IMU, ultrasonic, battery, RFID, IR,
-    #    doors, LCD (robot_interface package).
+    #    doors, LCD (hardware_bridge package).
     arduino_bridge = Node(
         package='hardware_bridge',
         executable='arduino_bridge',
@@ -145,39 +121,8 @@ def generate_launch_description():
         output='screen',
     )
 
-    # LiDAR selection: 'rplidar' (default) or 'ltme'.
-    lidar = LaunchConfiguration('lidar')
-    is_rplidar = IfCondition(PythonExpression(["'", lidar, "' == 'rplidar'"]))
-    is_ltme = IfCondition(PythonExpression(["'", lidar, "' == 'ltme'"]))
-
-    # --- RPLIDAR path -------------------------------------------------------
-    # 7a. t=2s: flush stale RPLIDAR serial buffer from any previous unclean shutdown.
-    reset_lidar = ExecuteProcess(
-        cmd=['python3', '-c', _RESET_CMD],
-        output='screen',
-    )
-
-    # 7b. t=9s: start sllidar. respawn handles rare single-timeout.
-    lidar_node = Node(
-        package='sllidar_ros2',
-        executable='sllidar_node',
-        name='sllidar_node',
-        parameters=[{
-            'channel_type': 'serial',
-            'serial_port': '/dev/sllidar',
-            'serial_baudrate': 115200,
-            'frame_id': 'laser',
-            'inverted': False,
-            'angle_compensate': True,
-        }],
-        output='screen',
-        respawn=True,
-        respawn_delay=5.0,
-    )
-
-    # --- LTME-02A path ------------------------------------------------------
-    # LitraTech LTME-02A over Ethernet (LDCP). No serial reset dance; the
-    # driver has its own connection-retry loop. Publishes /scan in 'laser'.
+    # 7. LiDAR — LitraTech LTME-02A over Ethernet (LDCP). The driver has its
+    #    own connection-retry loop. Publishes /scan in the 'laser' frame.
     ltme_node = Node(
         package='ltme_node',
         executable='ltme_node',
@@ -190,25 +135,18 @@ def generate_launch_description():
         output='screen',
         respawn=True,
         respawn_delay=5.0,
-        condition=is_ltme,
     )
 
     return LaunchDescription([
-        DeclareLaunchArgument('lidar', default_value='rplidar',
-                              description="LiDAR to bring up: 'rplidar' | 'ltme'"),
         DeclareLaunchArgument('arduino_dev', default_value='/dev/arduino',
                               description='Arduino Mega serial device'),
         DeclareLaunchArgument('ltme_address', default_value='192.168.10.160',
-                              description='LTME-02A IP[:port] (used when lidar:=ltme)'),
+                              description='LTME-02A IP[:port]'),
         rsp_node,
         jsp_node,
         wheel_pub,
         rf2o_node,
         ekf_node,
         arduino_bridge,
-        # RPLIDAR: reset then start sllidar (gated on lidar:=rplidar).
-        TimerAction(period=2.0, actions=[reset_lidar], condition=is_rplidar),
-        TimerAction(period=9.0, actions=[lidar_node], condition=is_rplidar),
-        # LTME-02A: start immediately (gated on lidar:=ltme).
         ltme_node,
     ])

@@ -10,7 +10,7 @@ install(
 
 # Make the helper scripts executable when installed
 install(
-  PROGRAMS scripts/wheel_joint_pub.py scripts/reset_lidar.py
+  PROGRAMS scripts/wheel_joint_pub.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

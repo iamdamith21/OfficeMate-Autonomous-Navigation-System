@@ -1,13 +1,40 @@
-# colcon build artifacts
+# ─── ROS 2 / colcon build artifacts ───
 build/
 install/
 log/
+.colcon/
 
-# python
+# ─── Python ───
+__pycache__/
 **/__pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+*.egg
+.eggs/
+.pytest_cache/
+.mypy_cache/
 
-# editor / os
-*.swp
+# ─── C/C++ intermediate objects ───
+*.o
+*.lo
+*.slo
+*.obj
+
+# ─── Arduino / arduino-cli build cache ───
+*.hex
+*.elf
+*.bin
+build-*/
+
+# ─── Editor / IDE ───
 .vscode/
+.idea/
+*.swp
+*.swo
+*~
+.clangd/
+compile_commands.json
+
+# ─── OS cruft ───
 .DS_Store
+Thumbs.db

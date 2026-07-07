@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>robot_firmware</name>
+  <version>3.0.0</version>
+  <description>
+    Arduino Mega 2560 firmware for the OfficeMate hardware hub: motor driver
+    (4WD skid-steer via 2x L298N), MPU6050 IMU, HC-SR04 ultrasonic, INA219
+    battery monitor, MFRC522 RFID, compartment IR, SG90 door servos and a
+    20x4 I2C LCD. Flashed to the board; the ROS-side peer that talks to it
+    over USB-serial is the hardware_bridge package. Includes flash_firmware.sh,
+    a one-command compile+upload helper built on arduino-cli.
+  </description>
+  <maintainer email="cldac@buyjustnow.com">damith</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

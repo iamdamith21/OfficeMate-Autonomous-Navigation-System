@@ -10,7 +10,7 @@
 set -euo pipefail
 
 PORT="${1:-/dev/arduino}"
-SKETCH_DIR="$(cd "$(dirname "$0")/../arduino/robot_firmware" && pwd)"
+SKETCH_DIR="$(cd "$(dirname "$0")/arduino/robot_firmware" && pwd)"
 CLI="$HOME/.local/bin/arduino-cli"
 
 if [ ! -x "$CLI" ]; then

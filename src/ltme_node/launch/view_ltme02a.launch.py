@@ -7,8 +7,8 @@ Brings up:
   * joint_state_publisher  (zeros for wheels/casters/laser so TF is complete)
   * ltme_node              (LTME-02A driver -> /scan in the 'laser' frame)
 
-This is a standalone test bringup that does NOT touch the RPLIDAR / sllidar
-setup or the rf2o/EKF odometry stack — it only exists to confirm the new
+This is a standalone test bringup that does NOT touch the
+rf2o/EKF odometry stack — it only exists to confirm the LTME-02A
 LiDAR works and to see its scan against the robot model in RViz.
 
 Run on the Pi (headless):
