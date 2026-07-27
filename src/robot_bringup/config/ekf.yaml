@@ -40,7 +40,18 @@ ekf_filter_node:
     odom0_differential: false
     odom0_queue_size: 5
 
-    # MPU9250 — gyro yaw rate only (no orientation estimate on /imu/data_raw)
+    # rf2o publishes an essentially fixed covariance that badly overstates its
+    # yaw confidence during pure rotation — scan matching is at its weakest
+    # exactly when the robot pivots, and this rig measured a 105 deg pivot as
+    # only 74.8 deg. Override it so the gyro, which is accurate precisely in
+    # that regime, actually wins the argument. Linear vx is left trusted:
+    # rf2o tracks translation to within 2% here.
+    odom0_pose_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 5.0
+
+    # MPU6500 — gyro yaw rate only (no orientation estimate on /imu/data_raw).
+    # Accel is deliberately not fused: the part reads ~10.32 m/s^2 for gravity
+    # (~5% scale error), which would bias any velocity integrated from it.
     imu0: /imu/data_raw
     imu0_config: [false, false, false,
                   false, false, false,
@@ -50,3 +61,26 @@ ekf_filter_node:
     imu0_differential: false
     imu0_remove_gravitational_acceleration: true
     imu0_queue_size: 10
+
+    # Process noise. Only the entries that matter here are tuned; the rest keep
+    # robot_localization's defaults.
+    #
+    # vyaw (index 11) is set LOW relative to the default 0.01: the gyro is a
+    # genuinely good yaw-rate source (measured noise sd 0.0025 rad/s), so the
+    # filter should trust its own propagated yaw rate rather than chase rf2o's
+    # noisier estimate. This is what stops the heading wandering mid-turn.
+    process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.03, 0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.02, 0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025, 0.0, 0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.025, 0.0, 0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.04, 0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.01,  0.0,   0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.01,  0.0,   0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.004, 0.0,  0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.01, 0.0,  0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.01, 0.0,
+                               0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.015]

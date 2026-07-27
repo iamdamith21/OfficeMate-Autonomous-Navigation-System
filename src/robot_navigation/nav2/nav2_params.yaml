@@ -12,6 +12,16 @@
 #   wheel_sep  : 0.33 m     wheel_radius : 0.065 m
 #   max speed  : 0.25 m/s   max ω        : 1.0 rad/s
 #
+# ANGULAR TUNING (2026-07-27): every angular limit used to sit at 0.20 rad/s,
+# which was the robot's measured full-PWM ceiling on a tired battery. Capping
+# the command at the saturation point left no proportional band at all — every
+# turn request became "full deflection", which is exactly why turning felt slow
+# AND jerky. Now 0.50 rad/s, with the firmware's pivot gain rescaled to match
+# so 0.50 rad/s maps onto full PWM. Turns are faster and, more importantly,
+# actually modulated. The real MPU6500 gyro (fitted 2026-07-27) is what makes
+# the higher rate safe: rotation used to wreck localisation because rf2o alone
+# cannot track a pivot.
+#
 # Odom source : EKF (rf2o + IMU gyro) → /odometry/filtered  (TF odom→base_footprint)
 # cmd_vel flow: controller_server → /cmd_vel_nav → velocity_smoother → /cmd_vel → robot
 # Low obstacles: HC-SR04 → /ultrasonic/range → local costmap range_layer
@@ -20,10 +30,13 @@
 amcl:
   ros__parameters:
     use_sim_time: false
-    alpha1: 0.2           # rot noise from rot
+    # alpha1/alpha4 (the rotation-driven terms) halved now that a real gyro
+    # feeds the EKF — odometry during a pivot is far better than it was, so
+    # AMCL no longer needs to spread particles so widely on every turn.
+    alpha1: 0.1           # rot noise from rot
     alpha2: 0.2           # rot noise from trans
     alpha3: 0.2           # trans noise from trans
-    alpha4: 0.2           # trans noise from rot
+    alpha4: 0.1           # trans noise from rot
     alpha5: 0.2           # trans noise from strafe
     base_frame_id: base_footprint
     global_frame_id: map
@@ -101,8 +114,8 @@ controller_server:
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.5
-      movement_time_allowance: 10.0
+      required_movement_radius: 0.25
+      movement_time_allowance: 25.0
 
     general_goal_checker:
       stateful: true
@@ -116,13 +129,19 @@ controller_server:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       angular_dist_threshold: 0.785    # rotate in-place if heading error > 45°
       forward_sampling_distance: 0.5   # check if path goes forward this far
-      rotate_to_heading_angular_vel: 0.8
-      max_angular_accel: 3.2
+      # 0.18 rad/s meant ~17 s to swing 180° before the robot even started
+      # following the path. This is the number that made navigation feel slow.
+      rotate_to_heading_angular_vel: 0.45
+      max_angular_accel: 1.5
       simulate_ahead_time: 1.0
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # Inner: RegulatedPurePursuitController
-      desired_linear_vel: 0.25         # m/s — target cruise speed
+      desired_linear_vel: 0.18         # m/s — target cruise speed
+      # RPP does its own in-place rotation when use_rotate_to_heading is on;
+      # without these it would fall back to defaults and undo the shim's rate.
+      rotate_to_heading_angular_vel: 0.45
+      max_angular_accel: 1.5
       lookahead_dist: 0.40             # m   — base lookahead
       min_lookahead_dist: 0.30
       max_lookahead_dist: 0.90
@@ -222,11 +241,16 @@ local_costmap:
       # so clear_on_max_reading frees the cone again once the way is clear.
       range_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
+        # Enabled 2026-07-27: the HC-SR04 is fitted and publishing ~12 Hz of
+        # valid ranges on /ultrasonic/range. Previously disabled because
+        # nothing published the topic.
         enabled: true
         topics: ["/ultrasonic/range"]
         phi: 1.2
         inflate_cone: 1.0
-        no_readings_timeout: 0.0
+        # Clear the layer if the sensor goes quiet for 2 s rather than leaving
+        # a stale phantom obstacle on the costmap forever if the Arduino drops.
+        no_readings_timeout: 2.0
         clear_threshold: 0.2
         mark_threshold: 0.8
         clear_on_max_reading: true
@@ -325,9 +349,9 @@ behavior_server:
     wait:
       plugin: "nav2_behaviors/Wait"
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.4
-    rotational_acc_lim: 3.2
+    max_rotational_vel: 0.50
+    min_rotational_vel: 0.08
+    rotational_acc_lim: 1.5
 
 # ── Waypoint follower ─────────────────────────────────────────────────────────
 waypoint_follower:
@@ -350,10 +374,18 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [ 0.25, 0.0,  1.0]
-    min_velocity: [-0.25, 0.0, -1.0]
-    max_accel:    [ 2.0,  0.0,  3.2]
-    max_decel:    [-2.0,  0.0, -3.2]
+    # This is the hard ceiling — nothing downstream can exceed it, so the
+    # controller limits above are pointless without raising it here too.
+    # Linear stays conservative: 0.15 m/s tracked to within 2% on this robot
+    # but 0.22 m/s was erratic, so 0.20 is the honest ceiling.
+    max_velocity: [ 0.20, 0.0,  0.50]
+    min_velocity: [-0.20, 0.0, -0.50]
+    # Accel limits are what make the motion SMOOTH rather than stepped. The
+    # controller runs at only 5 Hz on the Pi, so the smoother's 20 Hz ramp is
+    # doing most of the work of turning 5 Hz staircase commands into
+    # continuous motion. 1.5 rad/s² reaches full turn rate in ~0.33 s.
+    max_accel:    [ 0.4,  0.0,  1.5]
+    max_decel:    [-0.5,  0.0, -1.5]
     odom_topic: /odometry/filtered
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

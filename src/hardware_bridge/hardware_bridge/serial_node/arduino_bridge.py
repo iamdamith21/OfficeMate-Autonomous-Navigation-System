@@ -43,12 +43,31 @@ CMD_RATE_HZ = 20.0
 RECONNECT_S = 3.0
 DOOR_ACK_TIMEOUT_S = 4.0
 
+# Opening the port toggles DTR, which resets the Mega into its bootloader. The
+# bootloader only hands over to the sketch after the line goes quiet — and this
+# node's 20 Hz cmd timer starts writing immediately, so without this wait the
+# bootloader is held hostage forever and the sketch NEVER runs. Symptom: the
+# port opens fine, no 'S,READY' banner ever arrives, and every drive command is
+# silently ignored. Must exceed the Mega bootloader timeout (~1 s).
+#
+# Raised to 6 s for firmware v10: the sketch now averages the gyro for ~2 s at
+# boot to measure its bias, and the robot must be stationary and un-commanded
+# for the whole of it. Staying quiet until that finishes also keeps the Mega's
+# 64-byte serial RX buffer from overflowing while the sketch is not reading it.
+BOOT_WAIT_S = 6.0
+
+# Stop if /cmd_vel goes silent. Without this the last commanded velocity is
+# resent at CMD_RATE_HZ forever, so a teleop that crashes or is killed leaves
+# the robot driving with nothing left to stop it — the firmware watchdog cannot
+# help, because this node is still faithfully sending the stale value.
+CMD_TIMEOUT_S = 0.5
+
 # 3S li-ion pack voltage window for the percentage estimate
 BATT_EMPTY_V = 9.0
 BATT_FULL_V = 12.6
 
 SONAR_MIN_M = 0.02
-SONAR_MAX_M = 2.0
+SONAR_MAX_M = 3.0  # MUST match SONAR_MAX_M in robot_firmware.ino
 SONAR_FOV_RAD = 0.26  # ~15°
 
 
@@ -73,6 +92,7 @@ class ArduinoBridge(Node):
 
         self.linear_x = 0.0
         self.angular_z = 0.0
+        self.last_cmd_time = 0.0
         self.last_range = None
         self.last_range_time = 0.0
 
@@ -108,8 +128,18 @@ class ArduinoBridge(Node):
     def _cmd_vel_cb(self, msg: Twist):
         self.linear_x = msg.linear.x
         self.angular_z = msg.angular.z
+        self.last_cmd_time = time.monotonic()
 
     def _send_cmd(self):
+        # Dead-man: a publisher that dies must not leave us driving.
+        if (self.linear_x or self.angular_z) and \
+                time.monotonic() - self.last_cmd_time > CMD_TIMEOUT_S:
+            self.get_logger().warn(
+                f'/cmd_vel silent for >{CMD_TIMEOUT_S}s — stopping',
+                throttle_duration_sec=5.0)
+            self.linear_x = 0.0
+            self.angular_z = 0.0
+
         lin = self.linear_x
         if (self.stop_dist > 0 and lin > 0
                 and self.last_range is not None
@@ -142,11 +172,17 @@ class ArduinoBridge(Node):
     def _write_line(self, line: str) -> bool:
         with self.ser_lock:
             if self.ser is None:
+                # Throttled, or this fires 20x/s while the board is absent.
+                self.get_logger().warn(
+                    'Serial not ready — drive commands are being dropped',
+                    throttle_duration_sec=5.0)
                 return False
             try:
                 self.ser.write((line + '\n').encode('ascii'))
                 return True
-            except (serial.SerialException, OSError):
+            except (serial.SerialException, OSError) as e:
+                self.get_logger().warn(f'Serial write failed: {e}',
+                                       throttle_duration_sec=5.0)
                 return False  # reader loop handles the reconnect
 
     # ── incoming ────────────────────────────────────────────────────────────
@@ -155,9 +191,20 @@ class ArduinoBridge(Node):
             if self.ser is None:
                 try:
                     ser = serial.Serial(self.port, self.baud, timeout=1.0)
+                    # Let the bootloader time out and start the sketch BEFORE
+                    # publishing self.ser — _write_line returns False while it
+                    # is None, so the cmd timer stays quiet during the wait.
+                    self.get_logger().info(
+                        f'Opened {self.port} @ {self.baud}; '
+                        f'waiting {BOOT_WAIT_S}s for the sketch to boot')
+                    time.sleep(BOOT_WAIT_S)
+                    try:
+                        ser.reset_input_buffer()
+                    except (serial.SerialException, OSError):
+                        pass
                     with self.ser_lock:
                         self.ser = ser
-                    self.get_logger().info(f'Opened {self.port} @ {self.baud}')
+                    self.get_logger().info('Serial ready')
                 except (serial.SerialException, OSError) as e:
                     self.get_logger().warn(
                         f'Serial open failed ({e}); retrying in {RECONNECT_S}s',
@@ -220,7 +267,17 @@ class ArduinoBridge(Node):
         msg.angular_velocity.z = gz
         msg.orientation_covariance[0] = -1.0  # no orientation estimate
         for i in (0, 4, 8):
-            msg.angular_velocity_covariance[i] = 0.0004     # (0.02 rad/s)²
+            # Measured at rest on the real MPU6500 (sensor_check.py): gyro
+            # noise sd was 0.0025 rad/s on all three axes, and the boot-time
+            # bias calibration leaves a residual of ~0.0001 rad/s. 0.005 rad/s
+            # is that measurement with 2x headroom for vibration while driving.
+            # Do not tighten it further without re-measuring under load — an
+            # over-confident gyro will fight rf2o instead of complementing it.
+            msg.angular_velocity_covariance[i] = 2.5e-5     # (0.005 rad/s)²
+            # Accel is NOT fused (see ekf.yaml imu0_config) — this rig's part
+            # reads ~10.32 m/s² for gravity, a ~5% scale error typical of these
+            # clones. Left deliberately loose; fix by calibrating the part
+            # before ever enabling accel fusion.
             msg.linear_acceleration_covariance[i] = 0.25    # (0.5 m/s²)²
         self.pub_imu.publish(msg)
 

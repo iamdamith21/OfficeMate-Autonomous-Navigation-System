@@ -36,6 +36,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     pkg            = FindPackageShare("robot_navigation")
+    bringup_share  = FindPackageShare("robot_bringup")
     nav2_params    = PathJoinSubstitution([pkg, "nav2", "nav2_params.yaml"])
     cf_params      = PathJoinSubstitution([pkg, "nav2", "costmap_filter_params.yaml"])
     bt_xml         = PathJoinSubstitution([pkg, 'behavior_trees',
@@ -58,7 +59,7 @@ def generate_launch_description():
     # ── Robot hardware bringup ────────────────────────────────────────────────
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
-            PathJoinSubstitution([pkg, 'launch', 'bringup.launch.py'])
+            PathJoinSubstitution([bringup_share, 'launch', 'bringup.launch.py'])
         ]),
         launch_arguments={
             'arduino_dev': LaunchConfiguration('arduino_dev'),

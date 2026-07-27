@@ -19,12 +19,12 @@ slam_toolbox:
     mode: mapping
 
     debug_logging: false
-    throttle_scans: 1
+    throttle_scans: 2
     transform_publish_period: 0.02      # 50 Hz TF → no extrapolation
-    map_update_interval: 5.0
+    map_update_interval: 2.0
     resolution: 0.05
     max_laser_range: 12.0
-    minimum_time_interval: 0.5
+    minimum_time_interval: 0.2
     transform_timeout: 0.2
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
@@ -33,9 +33,9 @@ slam_toolbox:
     use_scan_barycenter: true
     # Leaner keyframe graph (was 0.05/0.1): fewer nodes → faster optimization
     # on the Pi, still dense enough for a small indoor robot.
-    minimum_travel_distance: 0.10
-    minimum_travel_heading: 0.15
-    scan_buffer_size: 15                 # more matching context (was 10)
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.08
+    scan_buffer_size: 20                 # more matching context (was 10)
     scan_buffer_maximum_scan_distance: 10.0
     link_match_minimum_response_fine: 0.12
     link_scan_maximum_distance: 1.5
@@ -48,12 +48,12 @@ slam_toolbox:
     loop_match_minimum_response_coarse: 0.40   # was 0.35
     loop_match_minimum_response_fine: 0.50     # was 0.45 (stricter)
 
-    correlation_search_space_dimension: 0.5
+    correlation_search_space_dimension: 0.8
     correlation_search_space_resolution: 0.01
-    correlation_search_space_smear_deviation: 0.1
+    correlation_search_space_smear_deviation: 0.05
 
-    distance_variance_penalty: 0.5
-    angle_variance_penalty: 1.0
+    distance_variance_penalty: 0.2
+    angle_variance_penalty: 0.3
     fine_search_angle_offset: 0.00349
     coarse_search_angle_offset: 0.349
     coarse_angle_resolution: 0.0349

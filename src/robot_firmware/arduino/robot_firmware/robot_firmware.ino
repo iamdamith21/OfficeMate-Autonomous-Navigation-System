@@ -1,502 +1,1079 @@
 /*
- * robot_firmware.ino v3 — OfficeMate sensor/actuator hub (4WD chassis)
+ * robot_firmware.ino v10 — OfficeMate sensor/actuator hub — MOTORS + IMU + SONAR
  *
  * Board : Arduino Mega 2560
- * Libs  : Servo, LiquidCrystal I2C (Frank de Brabander), MFRC522 (GithubCommunity)
- *         (Wire + SPI ship with the core.)
+ * Libs  : Wire (core only — no MPU/Servo/LCD libraries needed)
  *
- * Drives the motors from /cmd_vel and exposes every other sensor/actuator
- * to the Pi over one USB-serial link. The ROS-side peer is
- * robot_interface/arduino_bridge. Odometry fusion (rf2o + this IMU) happens
- * on the Pi; this board never publishes odometry itself.
+ * Fitted: the two L298N motor drivers, an MPU6050-or-MPU9250 IMU on I2C, and
+ * an HC-SR04 ultrasonic on TRIG=D40 / ECHO=D41. Still NOT fitted: MFRC522,
+ * LCD, INA219, IR, door servos — so the bridge's RFID / IR / battery / door
+ * publishers stay silent and O/C/L remain accepted-and-ignored.
  *
- * Udev rule (Pi, install once) so the board gets a stable device name:
- *   echo 'KERNEL=="ttyACM*",ATTRS{idVendor}=="2341",MODE:="0666",SYMLINK+="arduino"' \
- *        | sudo tee /etc/udev/rules.d/99-arduino.rules
- *   sudo udevadm control --reload-rules && sudo udevadm trigger
+ * The serial protocol is unchanged from v3.0, so hardware_bridge/arduino_bridge
+ * parses `I,` and `U,` lines with no ROS-side edits — those handlers were
+ * already written and simply had nothing to consume.
  *
- * ─── Wiring (see docs/wiring_diagram_v3.svg) ──────────────────────────────
- *  4WD skid-steer: two L298N drivers, one per side, 100 RPM gear motors.
- *  L298N LEFT  : ENA=9  (PWM, front-left)  IN1=22 IN2=23
- *                ENB=10 (PWM, rear-left)   IN3=24 IN4=25
- *  L298N RIGHT : ENA=5  (PWM, front-right) IN1=26 IN2=27
- *                ENB=6  (PWM, rear-right)  IN3=28 IN4=29
- *  Door servos : left=11, right=12  (SG90, powered from 5V buck, not the Mega)
- *  HC-SR04     : TRIG=30, ECHO=31   (front-low, catches what the lidar misses)
- *  IR sensor   : 32 (digital obstacle module inside compartment, active LOW)
- *  MFRC522     : SS=53, RST=49, SCK=52, MOSI=51, MISO=50 (3.3V supply!)
- *  I2C bus     : SDA=20, SCL=21 — MPU6050 @0x68, INA219 @0x40, LCD 20x4 @0x27
- *  INA219      : high-side on the 3S 11.1V drive battery (0.1 Ω shunt)
+ * ─── v10 CHANGE: IMU + ultrasonic, without disturbing the motors ───────────
+ * The hard constraint here is spwmTick() (see "Software PWM" below): the
+ * direction pins are chopped in software, so anything that blocks the main
+ * loop for more than a fraction of the 6 ms PWM period shows up as visible
+ * motor stutter. Both new sensors are therefore written to never block:
+ *
+ *   HC-SR04 : a 4-state non-blocking machine. The textbook pulseIn() call
+ *             busy-waits up to ~30 ms for the echo — five whole PWM periods,
+ *             which would wreck the motors. Instead the echo pin is POLLED
+ *             from loop() and edges are timestamped with micros(). loop()
+ *             iterates far faster than the ~58 us/cm echo resolution, so the
+ *             measurement is just as good and nothing ever stalls.
+ *
+ *   MPU     : one 14-byte burst read at 400 kHz I2C ≈ 350 us, at 50 Hz.
+ *             That is ~1.7% duty and the only blocking call left. Retries
+ *             (see mpuReadRaw) cost a second transaction on most cycles, so
+ *             the measured publish rate is ~40 Hz, not the nominal 50.
+ *
+ *   Serial  : IMU lines are only emitted when the UART TX buffer has room
+ *             (availableForWrite), so a slow reader on the Pi can never make
+ *             Serial.print() block the PWM loop. Dropping an IMU sample is
+ *             always better than glitching the motors.
+ *
+ * The gyro is bias-calibrated at boot (ROBOT MUST BE STATIONARY) and can be
+ * re-zeroed at any time with the `G` command. This matters: the EKF fuses
+ * gyro yaw-RATE, so an uncalibrated 1-2 deg/s bias integrates straight into
+ * a steadily rotating odometry estimate.
+ *
+ * ─── v6 CHANGE: stiction kick + higher floor ──────────────────────────────
+ * v5 published fine at 20 Hz but the robot still would not move on slow
+ * commands. Cause was mechanical, not electrical: 0.22 m/s maps to PWM 82,
+ * which cannot break static friction with four wheels loaded, while 0.5 m/s
+ * (PWM 187) drove fine. MIN_PWM is now 90, and a standing start or direction
+ * reversal gets KICK_MS at KICK_PWM before falling back to the commanded duty.
+ * That keeps genuinely slow mapping speeds usable.
+ *
+ * ─── v5 CHANGE: software PWM on the DIRECTION pins ────────────────────────
+ * The L298Ns on this rig have no working 5 V logic supply — they scavenge
+ * power through their logic pins. Consequence: they only stay alive while
+ * those pins are high a good fraction of the time.
+ *
+ * v4 hardware-PWMed the ENABLE lines, which meant low speed = low enable duty
+ * = the driver browning out. Measured: the wheels stop responding somewhere
+ * around PWM 100, so /cmd_vel at 0.2 m/s (PWM 74) did nothing at all while the
+ * 150-255 bench tests worked fine.
+ *
+ * v5 holds all four enables at solid DC HIGH — maximum scavenged power at any
+ * speed — and chops the direction pins in software for speed control. The two
+ * concerns are now independent.
+ *
+ * D30-D37 are not hardware-PWM pins, hence software PWM: ~167 Hz, far above
+ * anything the gearboxes respond to. It is cheap because a pin is only written
+ * when its state actually changes.
+ *
+ * THIS IS STILL A WORKAROUND. Give the L298Ns a real 5 V supply (refit the
+ * 3-pin 78M05 regulator jumper, or feed 5 V from the buck) and the whole
+ * scavenging problem disappears.
+ *
+ * ─── DAMAGED PINS ON THIS BOARD — DO NOT USE ──────────────────────────────
+ *   Measured by pin_health.ino, not assumed:
+ *     D2   stuck low  (NO_SOURCE, pull-up cannot lift it)
+ *     D5   stuck high (NO_SINK)
+ *     D9   stuck low  <- was an enable, moved to D7
+ *     D10  stuck low  <- was an enable, moved to D8
+ *   D22-D25 and D28-D29 leak to ground (pass pull-up, fail charge retention)
+ *   and are avoided. D3 measured healthy despite earlier reports. D0/D1 are
+ *   RX0/TX0 and are proven good by uploads working.
+ *
+ * ─── Wiring — drivers split by SIDE (left / right) ────────────────────────
+ *  L298N LEFT  : ENA=7  (front-left)  IN1=30 IN2=31
+ *                ENB=8  (rear-left)   IN3=32 IN4=33
+ *  L298N RIGHT : ENA=11 (front-right) IN1=34 IN2=35
+ *                ENB=12 (rear-right)  IN3=36 IN4=37
+ *
+ *  Enables are plain DC outputs now, so they no longer need to be PWM pins.
+ *  Remove the ENA/ENB jumper caps on both boards. Both L298N GND pins MUST
+ *  tie to Mega GND.
+ *
+ *  NOTE: with a per-side split a dead driver takes out an entire side and the
+ *  robot will spin rather than limp.
+ *
+ * ─── Wiring — sensors (v10) ───────────────────────────────────────────────
+ *  MPU6050 / MPU9250 : VCC=5V (breakouts have a 3.3 V LDO), GND, SDA=D20,
+ *                      SCL=D21. AD0 low = 0x68, high = 0x69 — both probed.
+ *                      D20/D21 read NO_SINK on pin_health: that is just the
+ *                      I2C pull-ups, not damage.
+ *  HC-SR04           : VCC=5V, GND, TRIG=D40, ECHO=D41. Both measured healthy
+ *                      and clear of the damaged-pin list. The Mega is a 5 V
+ *                      part so the echo line needs no divider.
+ *
+ *  IMU MOUNTING: the sketch assumes the breakout lies flat with its +X
+ *  silkscreen arrow pointing FORWARD and +Z up. If yours is rotated, fix it
+ *  with IMU_AXIS_* below rather than in ROS — the EKF wants a genuine
+ *  base_link-aligned reading. Sanity check: rotate the robot counter-clockwise
+ *  (left) and gz must go POSITIVE (REP-103 right-hand rule).
  *
  * ─── Serial protocol (115200 baud, one ASCII line per message) ─────────────
  *  Pi → board:
  *    V,<lin m/s>,<ang rad/s>   drive command (watchdog: stop after 500 ms)
- *    O                         open compartment doors
- *    C                         close compartment doors
- *    L,<text>                  LCD line 2 (20 chars max)
+ *    M,<left>,<right>          RAW per-side PWM, -255..255
+ *    W,<fl>,<fr>,<rl>,<rr>     RAW per-wheel PWM
+ *    X                         self-demo: cycles every wheel unaided, ~17 s
+ *    Y,<0-3>                   drive only wheel N at full (now same as W)
+ *    S                         stop immediately
+ *    P                         ping → replies "S,PONG"
+ *    G                         re-zero the gyro bias (robot must be still)
+ *    Z                         sensor diagnostics: I2C scan + one sonar ping
+ *    O / C / L,<text>          accepted and ignored (no doors/LCD fitted)
  *  Board → Pi:
- *    S,READY,v2.0              boot complete (after gyro bias calibration)
- *    I,ax,ay,az,gx,gy,gz       IMU 50 Hz  (m/s², rad/s, bias-corrected gyro)
- *    U,<m>                     ultrasonic 15 Hz (-1.0 = no echo)
- *    B,<V>,<A>                 battery 1 Hz (bus volts, amps)
- *    R,<UIDHEX>                RFID tag scanned (2 s duplicate suppression)
- *    D,<0|1>                   compartment IR: 1 = item present (on change + 2 s refresh)
- *    A,DOORS,<MOVING|OPEN|CLOSED>  door actuation progress
+ *    S,READY,<ver>             boot complete
+ *    S,PONG                    ping reply
+ *    S,IMU,<name>,0x<addr>     IMU detected at boot
+ *    S,GYROCAL,<gx>,<gy>,<gz>  gyro bias in rad/s after calibration
+ *    I,ax,ay,az,gx,gy,gz       IMU 50 Hz — m/s^2 and rad/s, base_link axes
+ *    U,<metres>                ultrasonic ~15 Hz; -1 means no echo
  *    E,<msg>                   error/diagnostic
  *
  * ─── Tuning ────────────────────────────────────────────────────────────────
- *  MAX_RPM, WHEEL_* : match urdf/properties.xacro
- *  DOOR_*_OPEN/CLOSED : servo endpoint angles — set on the assembled chassis
- *  SERVO_DETACH     : detach after motion to stop SG90 buzz; set to 0 if the
- *                     doors sag under their own weight when unpowered
+ *  WHEEL_RADIUS / WHEEL_SEP / MAX_RPM : match urdf/properties.xacro
+ *  MIN_PWM  : stiction floor. With v5 this is a real mechanical floor rather
+ *             than the driver browning out, so it can go lower than before.
+ *  INVERT_* : flip if a side runs backwards.
  */
-#include <Servo.h>
+
+#define FW_VERSION "v10.0-imu-sonar"
+
 #include <Wire.h>
-#include <SPI.h>
-#include <MFRC522.h>
-#include <LiquidCrystal_I2C.h>
 
-#define FW_VERSION "v3.0"
+// ─── Motor driver pins (2× L298N, one per SIDE) ────────────────────────────
+// All twelve verified PASS by pin_health.ino before being chosen.
+#define FL_EN   7    // L298N-LEFT  ENA — front-left
+#define FL_INA 30
+#define FL_INB 31
+#define RL_EN   8    // L298N-LEFT  ENB — rear-left
+#define RL_INA 32
+#define RL_INB 33
+#define FR_EN  11    // L298N-RIGHT ENA — front-right
+#define FR_INA 34
+#define FR_INB 35
+#define RR_EN  12    // L298N-RIGHT ENB — rear-right
+#define RR_INA 36
+#define RR_INB 37
 
-// ─── Motor driver pins (2× L298N, one per side) ────────────────────────────
-#define FL_EN   9    // L298N-L ENA — front-left
-#define FL_INA 22
-#define FL_INB 23
-#define RL_EN  10    // L298N-L ENB — rear-left
-#define RL_INA 24
-#define RL_INB 25
-#define FR_EN   5    // L298N-R ENA — front-right
-#define FR_INA 26
-#define FR_INB 27
-#define RR_EN   6    // L298N-R ENB — rear-right
-#define RR_INA 28
-#define RR_INB 29
-
-// ─── Peripheral pins ───────────────────────────────────────────────────────
-#define DOOR_L_PIN     11
-#define DOOR_R_PIN     12
-#define SONAR_TRIG     30
-#define SONAR_ECHO     31
-#define IR_PIN         32
-#define RFID_SS        53
-#define RFID_RST       49
+// ─── Ultrasonic pins (HC-SR04) ─────────────────────────────────────────────
+#define SONAR_TRIG 40
+#define SONAR_ECHO 41
 
 // ─── Robot parameters (match URDF properties.xacro) ───────────────────────
-#define WHEEL_RADIUS    0.065f   // ← TUNE: new 4WD wheels
-#define WHEEL_SEP       0.330f   // ← TUNE: track width of the new chassis
-#define MAX_RPM         100      // 100 RPM gear motors
+#define WHEEL_RADIUS    0.065f
+#define WHEEL_SEP       0.330f
+#define MAX_RPM         100
 #define MAX_SPEED_MPS   (MAX_RPM / 60.0f * 2.0f * 3.14159265f * WHEEL_RADIUS)
 
-// ─── Doors ─────────────────────────────────────────────────────────────────
-#define DOOR_L_OPEN     90     // ← TUNE on assembled chassis
-#define DOOR_L_CLOSED    0
-#define DOOR_R_OPEN     90
-#define DOOR_R_CLOSED    0
-#define DOOR_STEP_DEG    2     // per 20 ms tick → ~0.9 s for a 90° swing
-#define SERVO_DETACH     1     // 1: detach 1 s after reaching target
+// ─── Drive shaping ─────────────────────────────────────────────────────────
+// Stiction floor. Measured on the floor with all four wheels loaded: PWM 82
+// (0.22 m/s commanded) could not break static friction, while 187 (0.5 m/s)
+// drove fine. 90 is the lowest duty that reliably keeps the robot rolling once
+// it is already moving — starting from rest is handled by the kick below.
+#define MIN_PWM         90
+#define INVERT_LEFT      0
+#define INVERT_RIGHT     0
 
-// ─── I2C addresses ─────────────────────────────────────────────────────────
-#define MPU_ADDR    0x68
-#define INA_ADDR    0x40
-#define LCD_ADDR    0x27
+// ─── Skid-steer turn authority ─────────────────────────────────────────────
+// A differential-drive mix (v = lin ± ang * track/2) assumes wheels that can
+// pivot freely. A 4WD skid-steer cannot: to rotate, all four wheels must scrub
+// sideways across the floor, and that scrub resists the turn hard. The honest
+// differential mix therefore under-drives rotation badly — 0.9 rad/s produced
+// only ±0.148 m/s of wheel-speed difference, which barely moved the robot.
+//
+// TURN_GAIN widens the *effective* track to compensate. 2.0 is a typical
+// starting point for a 4WD skid-steer on hard floor; raise it if turns are
+// still lazy, lower it if the robot over-rotates versus the commanded yaw.
+//
+// This deliberately breaks the "commanded rad/s == actual rad/s" contract.
+// That is fine here: odometry comes from the LiDAR (rf2o), not from these
+// numbers, so the map stays correct either way. It would NOT be acceptable if
+// wheel odometry were feeding the EKF.
+#define TURN_GAIN       2.0f
+
+// ─── Pivot boost ───────────────────────────────────────────────────────────
+// One gain cannot serve both jobs.
+//
+//   Following a path, the controller issues small heading corrections while
+//   cruising. Those need a GENTLE gain — at TURN_GAIN 20 a 0.05 rad/s trim
+//   would reverse one whole side and the robot would lurch down the path.
+//
+//   Turning on the spot needs a HUGE gain. Measured: rotation only happens
+//   near full PWM (PWM 162 -> 0.057 rad/s, PWM 255 -> 0.220 rad/s), because
+//   all four wheels must scrub sideways. With TURN_GAIN 2.0, Nav2 commanding
+//   its 0.20 rad/s limit produced PWM 106 — nowhere near enough, so the robot
+//   simply did not turn and Nav2's spin recovery timed out.
+//
+// So blend: full pivot authority when barely translating, normal arc gain once
+// rolling. pivot_frac goes 1 -> 0 as |lin| rises to PIVOT_LIN_REF.
+//
+// SIZING THIS GAIN (v10, 2026-07-27): it must map Nav2's MAXIMUM angular
+// command onto full PWM — no more, no less.
+//
+//   gain = MAX_SPEED_MPS / (max_ang * WHEEL_SEP/2)
+//        = 0.6807 / (0.50 * 0.165) = 8.25  ->  8.0
+//
+// Nav2's angular ceiling was raised from 0.20 to 0.50 rad/s (see
+// nav2_params.yaml), so the old 20.0 is now badly wrong in a way that matters:
+// at gain 20 a 0.50 rad/s command asks for 2.5x full speed, the mix saturates,
+// and EVERY turn command from 0.20 rad/s upward produces identical full-PWM
+// output. That is a bang-bang controller — the robot slams into the turn and
+// cannot modulate, which reads as "jerky" no matter what the smoother does.
+//
+// At 8.0 the whole 0 -> 0.50 rad/s range maps onto MIN_PWM -> 255, so the
+// controller gets a genuine proportional band and turns come out smooth.
+#define TURN_GAIN_PIVOT  8.0f
+#define PIVOT_LIN_REF   0.10f
+
+// ─── Stiction kick ─────────────────────────────────────────────────────────
+// Static friction is far higher than rolling friction, so the duty needed to
+// START moving is much higher than the duty needed to KEEP moving. Without
+// this, any slow command just makes the motors buzz and stall.
+//
+// On a 0 -> moving transition (or a direction reversal) the channel is driven
+// at KICK_PWM for KICK_MS, then falls back to the commanded duty. This lets
+// /cmd_vel ask for genuinely slow speeds — which is what SLAM wants — without
+// the robot refusing to start.
+#define KICK_PWM       230
+#define KICK_MS        180
+
+// ─── Software PWM ──────────────────────────────────────────────────────────
+#define SPWM_PERIOD_US 6000UL  // ~167 Hz
 
 // ─── Timing ────────────────────────────────────────────────────────────────
-#define CMD_TIMEOUT_MS     500
-#define IMU_PERIOD_MS       20   // 50 Hz
-#define SONAR_PERIOD_MS     66   // ~15 Hz
-#define BATT_PERIOD_MS    1000
-#define RFID_PERIOD_MS     100
-#define IR_PERIOD_MS        50
-#define IR_REFRESH_MS     2000
-#define DOOR_PERIOD_MS      20
-#define RFID_DEDUP_MS     2000
-#define SERIAL_BAUD     115200
-#define LINE_BUF_LEN        64
+#define CMD_TIMEOUT_MS   500
+#define SERIAL_BAUD    115200
+#define LINE_BUF_LEN       64
+
+// ─── IMU (MPU6050 / MPU9250 / MPU6500) ─────────────────────────────────────
+// One driver serves all three. The MPU9250 is an MPU6500 die plus an AK8963
+// magnetometer, and the MPU6500 keeps the MPU6050's accel/gyro register map —
+// so 0x3B..0x48 reads identically on every one of them. Only WHO_AM_I differs,
+// and we use it purely to name the part in the boot banner. The magnetometer
+// is deliberately NOT read: the EKF fuses yaw RATE, not heading, and an
+// uncalibrated magnetometer near two L298Ns and four motors is worse than
+// useless indoors.
+// I2C bus clock. 400 kHz keeps the 14-byte burst near 350 us, but only works
+// on clean wiring — see the `Z` diagnostic's per-clock burst test.
+#define I2C_CLOCK_HZ   400000UL
+#define MPU_ADDR_A     0x68   // AD0 low
+#define MPU_ADDR_B     0x69   // AD0 high
+#define MPU_REG_SMPLRT 0x19
+#define MPU_REG_CONFIG 0x1A
+#define MPU_REG_GYRO   0x1B
+#define MPU_REG_ACCEL  0x1C
+#define MPU_REG_DATA   0x3B
+#define MPU_REG_PWR1   0x6B
+#define MPU_REG_WHOAMI 0x75
+
+// ±250 °/s and ±2 g — the most sensitive ranges, which is what we want: this
+// robot tops out near 0.5 rad/s (29 °/s) and 0.2 m/s, nowhere near saturating.
+#define GYRO_LSB_PER_DPS  131.0f
+#define ACCEL_LSB_PER_G 16384.0f
+#define DEG2RAD          0.0174532925f
+#define GRAVITY          9.80665f
+
+#define IMU_PERIOD_MS      20    // 50 Hz — matches the bridge's declared rate
+#define GYRO_CAL_SAMPLES  400    // ~2 s of averaging at boot
+
+// Axis remap: set these to match how the breakout is physically mounted.
+// Defaults assume +X forward, +Y left, +Z up (REP-103, same as base_link).
+// Use -1 to flip an axis, or swap the source indices to rotate the board.
+// Order of the raw triplet is [X, Y, Z] as the chip reports it.
+#define IMU_AXIS_X_SRC 0
+#define IMU_AXIS_Y_SRC 1
+#define IMU_AXIS_Z_SRC 2
+#define IMU_AXIS_X_SGN  1.0f
+#define IMU_AXIS_Y_SGN  1.0f
+#define IMU_AXIS_Z_SGN  1.0f
+
+// ─── Ultrasonic (HC-SR04) ──────────────────────────────────────────────────
+// 15 Hz. Faster than ~20 Hz risks hearing the PREVIOUS ping's echo bouncing
+// back off a far wall and reporting a phantom close obstacle.
+#define SONAR_PERIOD_MS    66
+// Usable horizon. The HC-SR04 is specified to 4 m; 3.0 m is a sane local
+// obstacle range for a 0.44 m robot in a 5.7 x 6.65 m room and leaves margin
+// above the ~2.4 m this unit reads across the room. MUST match SONAR_MAX_M in
+// arduino_bridge.py — the bridge reports max_range on no-echo so the costmap
+// clears, and a mismatch would make the cone clear the wrong depth.
+#define SONAR_MAX_M      3.0f
+#define SPEED_OF_SOUND    343.0f
+// Echo pulse width for the max range, plus margin: 3 m round trip is 17.5 ms.
+// Beyond this we call it a no-echo rather than waiting for the sensor's own
+// ~38 ms timeout, which would halve the update rate.
+#define SONAR_ECHO_TIMEOUT_US 25000UL
+#define SONAR_RISE_TIMEOUT_US 30000UL   // sensor never answered at all
 
 // ─── State ─────────────────────────────────────────────────────────────────
 unsigned long last_cmd_ms = 0;
 char          line_buf[LINE_BUF_LEN];
 uint8_t       line_len = 0;
+bool          raw_mode = false;   // M/W/Y latch; exempt from the watchdog
 
-Servo door_l, door_r;
-int   door_l_pos = DOOR_L_CLOSED, door_r_pos = DOOR_R_CLOSED;
-int   door_l_tgt = DOOR_L_CLOSED, door_r_tgt = DOOR_R_CLOSED;
-bool  doors_moving = false;
-bool  doors_open_cmd = false;
-unsigned long door_settle_ms = 0;
+struct Channel {
+    uint8_t       en, ina, inb;
+    int8_t        dir;         // +1 forward, -1 reverse, 0 brake
+    uint8_t       duty;        // 0..255
+    bool          last_on;
+    int8_t        last_dir;
+    unsigned long kick_until;  // millis() deadline for the stiction kick
+};
 
-MFRC522 rfid(RFID_SS, RFID_RST);
-LiquidCrystal_I2C lcd(LCD_ADDR, 20, 4);   // 20x4 (lines 3-4 free for later)
+// Order matters: FL, FR, RL, RR — matches the W command argument order.
+Channel CH[4] = {
+    {FL_EN, FL_INA, FL_INB, 0, 0, false, 0, 0},
+    {FR_EN, FR_INA, FR_INB, 0, 0, false, 0, 0},
+    {RL_EN, RL_INA, RL_INB, 0, 0, false, 0, 0},
+    {RR_EN, RR_INA, RR_INB, 0, 0, false, 0, 0},
+};
 
-bool  mpu_ok = false, ina_ok = false, lcd_ok = false, rfid_ok = false;
-float gyro_bias[3] = {0, 0, 0};
+// IMU state
+uint8_t       imu_addr = 0;      // 0 = not detected; sensor code no-ops
+float         gyro_bias[3] = {0.0f, 0.0f, 0.0f};   // rad/s, subtracted on read
+unsigned long imu_next_ms = 0;
 
-byte          last_uid[10];
-uint8_t       last_uid_len = 0;
-unsigned long last_uid_ms = 0;
+// Ultrasonic state machine
+enum SonarState { SONAR_IDLE, SONAR_TRIGGER, SONAR_WAIT_RISE, SONAR_WAIT_FALL };
+SonarState    sonar_state = SONAR_IDLE;
+unsigned long sonar_next_ms = 0;
+unsigned long sonar_phase_us = 0;   // when the current phase started
+unsigned long sonar_echo_start_us = 0;
 
-int  ir_state = -1;            // -1 forces first publish
-unsigned long last_ir_sent_ms = 0;
+// ───────────────────────────────────────────────────────────────────────────
+// Software PWM — call as often as possible from loop()
+// ───────────────────────────────────────────────────────────────────────────
+void spwmTick() {
+    unsigned long phase = micros() % SPWM_PERIOD_US;
+    unsigned long now = millis();
+    for (uint8_t i = 0; i < 4; i++) {
+        Channel &c = CH[i];
 
-unsigned long t_imu = 0, t_sonar = 0, t_batt = 0, t_rfid = 0,
-              t_ir = 0, t_door = 0;
-
-// ─── Motor control (skid-steer: left pair, right pair) ────────────────────
-void driveMotor(uint8_t en, uint8_t in_a, uint8_t in_b, float vel_mps) {
-    int pwm = (int)constrain(
-        fabsf(vel_mps) / MAX_SPEED_MPS * 255.0f, 0.0f, 255.0f);
-    if (vel_mps >= 0) {
-        digitalWrite(in_a, HIGH); digitalWrite(in_b, LOW);
-    } else {
-        digitalWrite(in_a, LOW);  digitalWrite(in_b, HIGH);
-    }
-    analogWrite(en, pwm);
-}
-
-void driveSides(float v_l, float v_r) {
-    driveMotor(FL_EN, FL_INA, FL_INB, v_l);
-    driveMotor(RL_EN, RL_INA, RL_INB, v_l);
-    driveMotor(FR_EN, FR_INA, FR_INB, v_r);
-    driveMotor(RR_EN, RR_INA, RR_INB, v_r);
-}
-
-void stopMotors() {
-    const uint8_t en[]  = {FL_EN, RL_EN, FR_EN, RR_EN};
-    const uint8_t in[]  = {FL_INA, FL_INB, RL_INA, RL_INB,
-                           FR_INA, FR_INB, RR_INA, RR_INB};
-    for (uint8_t i = 0; i < 4; i++) analogWrite(en[i], 0);
-    for (uint8_t i = 0; i < 8; i++) digitalWrite(in[i], LOW);
-}
-
-// ─── I2C helpers ───────────────────────────────────────────────────────────
-bool i2cWrite8(uint8_t addr, uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg); Wire.write(val);
-    return Wire.endTransmission() == 0;
-}
-
-bool i2cReadN(uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t n) {
-    Wire.beginTransmission(addr);
-    Wire.write(reg);
-    if (Wire.endTransmission(false) != 0) return false;
-    if (Wire.requestFrom(addr, n) != n) return false;
-    for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
-    return true;
-}
-
-// ─── MPU6050 (raw registers — no library) ──────────────────────────────────
-bool mpuInit() {
-    if (!i2cWrite8(MPU_ADDR, 0x6B, 0x00)) return false;  // wake
-    delay(100);
-    i2cWrite8(MPU_ADDR, 0x6B, 0x01);  // clock = gyro PLL
-    i2cWrite8(MPU_ADDR, 0x1A, 0x03);  // DLPF 44/42 Hz (accel+gyro)
-    i2cWrite8(MPU_ADDR, 0x1B, 0x00);  // gyro ±250 dps
-    i2cWrite8(MPU_ADDR, 0x1C, 0x00);  // accel ±2 g
-    return true;
-}
-
-// raw[0..2]=accel xyz, raw[3..5]=gyro xyz
-bool mpuRead(int16_t raw[6]) {
-    uint8_t b[14];
-    if (!i2cReadN(MPU_ADDR, 0x3B, b, 14)) return false;
-    raw[0] = (b[0] << 8) | b[1];
-    raw[1] = (b[2] << 8) | b[3];
-    raw[2] = (b[4] << 8) | b[5];
-    raw[3] = (b[8]  << 8) | b[9];    // skip temp (b[6..7])
-    raw[4] = (b[10] << 8) | b[11];
-    raw[5] = (b[12] << 8) | b[13];
-    return true;
-}
-
-// Robot must be stationary during boot — averages the gyro zero offset.
-void mpuCalibrateGyro() {
-    long sum[3] = {0, 0, 0};
-    int16_t raw[6];
-    const int N = 200;
-    for (int i = 0; i < N; i++) {
-        if (mpuRead(raw)) {
-            sum[0] += raw[3]; sum[1] += raw[4]; sum[2] += raw[5];
-        }
-        delay(5);
-    }
-    for (int i = 0; i < 3; i++) gyro_bias[i] = sum[i] / (float)N;
-}
-
-void publishImu() {
-    int16_t raw[6];
-    if (!mpuRead(raw)) { mpu_ok = false; Serial.println(F("E,IMU_READ_FAIL")); return; }
-    const float A = 9.80665f / 16384.0f;            // ±2 g  → m/s²
-    const float G = (1.0f / 131.0f) * 0.01745329f;  // ±250 dps → rad/s
-    Serial.print(F("I,"));
-    Serial.print(raw[0] * A, 3); Serial.print(',');
-    Serial.print(raw[1] * A, 3); Serial.print(',');
-    Serial.print(raw[2] * A, 3); Serial.print(',');
-    Serial.print((raw[3] - gyro_bias[0]) * G, 4); Serial.print(',');
-    Serial.print((raw[4] - gyro_bias[1]) * G, 4); Serial.print(',');
-    Serial.println((raw[5] - gyro_bias[2]) * G, 4);
-}
-
-// ─── INA219 (raw registers — no library) ───────────────────────────────────
-#define INA_SHUNT_OHMS 0.1f
-
-bool inaInit() {
-    // Config: 32 V range, ±320 mV shunt gain, 12-bit, continuous
-    Wire.beginTransmission(INA_ADDR);
-    Wire.write(0x00); Wire.write(0x39); Wire.write(0x9F);
-    return Wire.endTransmission() == 0;
-}
-
-float inaReadAmps() {
-    uint8_t b[2];
-    if (!i2cReadN(INA_ADDR, 0x01, b, 2)) return 0.0f;
-    int16_t shunt = (b[0] << 8) | b[1];      // LSB = 10 µV
-    return shunt * 10e-6f / INA_SHUNT_OHMS;
-}
-
-// Returns false on I2C failure; volts/amps valid only on true.
-bool readBattery(float *volts, float *amps) {
-    uint8_t b[2];
-    if (!i2cReadN(INA_ADDR, 0x02, b, 2)) { ina_ok = false; return false; }
-    *volts = (((b[0] << 8) | b[1]) >> 3) * 0.004f;
-    *amps = inaReadAmps();
-    return true;
-}
-
-// ─── LCD ───────────────────────────────────────────────────────────────────
-#define LCD_COLS 20
-
-void lcdBattLine(float volts, float amps) {
-    if (!lcd_ok) return;
-    char buf[LCD_COLS + 1], v[8], a[8];
-    dtostrf(volts, 4, 1, v);
-    dtostrf(amps, 4, 2, a);
-    snprintf(buf, sizeof(buf), "Batt %sV  %sA", v, a);
-    lcd.setCursor(0, 0);
-    lcd.print(buf);
-    for (uint8_t i = strlen(buf); i < LCD_COLS; i++) lcd.print(' ');
-}
-
-void lcdLine2(const char *text) {
-    if (!lcd_ok) return;
-    lcd.setCursor(0, 1);
-    uint8_t n = 0;
-    while (text[n] && n < LCD_COLS) { lcd.print(text[n]); n++; }
-    while (n < LCD_COLS) { lcd.print(' '); n++; }
-}
-
-// ─── Ultrasonic ────────────────────────────────────────────────────────────
-void publishSonar() {
-    digitalWrite(SONAR_TRIG, LOW);  delayMicroseconds(2);
-    digitalWrite(SONAR_TRIG, HIGH); delayMicroseconds(10);
-    digitalWrite(SONAR_TRIG, LOW);
-    // 12 ms timeout ≈ 2 m max range; keeps the loop responsive
-    unsigned long dur = pulseIn(SONAR_ECHO, HIGH, 12000UL);
-    Serial.print(F("U,"));
-    if (dur == 0) Serial.println(F("-1.0"));
-    else          Serial.println(dur * 0.0001715f, 3);  // t/2 × 343 m/s
-}
-
-// ─── RFID ──────────────────────────────────────────────────────────────────
-void pollRfid() {
-    if (!rfid_ok) return;
-    if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
-
-    bool same = (rfid.uid.size == last_uid_len) &&
-                (memcmp(rfid.uid.uidByte, last_uid, last_uid_len) == 0);
-    if (same && millis() - last_uid_ms < RFID_DEDUP_MS) {
-        rfid.PICC_HaltA();
-        return;
-    }
-    memcpy(last_uid, rfid.uid.uidByte, rfid.uid.size);
-    last_uid_len = rfid.uid.size;
-    last_uid_ms = millis();
-
-    Serial.print(F("R,"));
-    for (byte i = 0; i < rfid.uid.size; i++) {
-        if (rfid.uid.uidByte[i] < 0x10) Serial.print('0');
-        Serial.print(rfid.uid.uidByte[i], HEX);
-    }
-    Serial.println();
-    rfid.PICC_HaltA();
-}
-
-// ─── IR compartment sensor ─────────────────────────────────────────────────
-void pollIr() {
-    int occupied = (digitalRead(IR_PIN) == LOW) ? 1 : 0;  // module active LOW
-    if (occupied != ir_state || millis() - last_ir_sent_ms > IR_REFRESH_MS) {
-        ir_state = occupied;
-        last_ir_sent_ms = millis();
-        Serial.print(F("D,"));
-        Serial.println(occupied);
-    }
-}
-
-// ─── Doors ─────────────────────────────────────────────────────────────────
-void doorsCommand(bool open) {
-    doors_open_cmd = open;
-    door_l_tgt = open ? DOOR_L_OPEN : DOOR_L_CLOSED;
-    door_r_tgt = open ? DOOR_R_OPEN : DOOR_R_CLOSED;
-    if (!door_l.attached()) door_l.attach(DOOR_L_PIN);
-    if (!door_r.attached()) door_r.attach(DOOR_R_PIN);
-    doors_moving = true;
-    Serial.println(F("A,DOORS,MOVING"));
-}
-
-int stepToward(int pos, int tgt) {
-    if (pos < tgt) return min(pos + DOOR_STEP_DEG, tgt);
-    if (pos > tgt) return max(pos - DOOR_STEP_DEG, tgt);
-    return pos;
-}
-
-void updateDoors() {
-    if (doors_moving) {
-        door_l_pos = stepToward(door_l_pos, door_l_tgt);
-        door_r_pos = stepToward(door_r_pos, door_r_tgt);
-        door_l.write(door_l_pos);
-        door_r.write(door_r_pos);
-        if (door_l_pos == door_l_tgt && door_r_pos == door_r_tgt) {
-            doors_moving = false;
-            door_settle_ms = millis();
-            Serial.println(doors_open_cmd ? F("A,DOORS,OPEN")
-                                          : F("A,DOORS,CLOSED"));
-        }
-    } else if (SERVO_DETACH && door_l.attached() &&
-               millis() - door_settle_ms > 1000) {
-        door_l.detach();
-        door_r.detach();
-    }
-}
-
-// ─── Serial command parsing ─────────────────────────────────────────────────
-void handleLine(char *line) {
-    switch (line[0]) {
-    case 'V': {
-        if (line[1] != ',') return;
-        char *p = line + 2;
-        char *comma = strchr(p, ',');
-        if (!comma) return;
-        *comma = '\0';
-        float v = atof(p);
-        float w = atof(comma + 1);
-        driveSides(v - w * (WHEEL_SEP / 2.0f),
-                   v + w * (WHEEL_SEP / 2.0f));
-        last_cmd_ms = millis();
-        break;
-    }
-    case 'O': doorsCommand(true);  break;
-    case 'C': doorsCommand(false); break;
-    case 'L':
-        if (line[1] == ',') lcdLine2(line + 2);
-        break;
-    }
-}
-
-void pollSerial() {
-    while (Serial.available() > 0) {
-        char c = Serial.read();
-        if (c == '\n') {
-            line_buf[line_len] = '\0';
-            handleLine(line_buf);
-            line_len = 0;
-        } else if (c != '\r') {
-            if (line_len < LINE_BUF_LEN - 1) {
-                line_buf[line_len++] = c;
+        // Apply the stiction kick if this channel just started moving.
+        uint8_t duty = c.duty;
+        if (c.kick_until) {
+            if ((long)(now - c.kick_until) < 0) {
+                if (duty > 0 && duty < KICK_PWM) duty = KICK_PWM;
             } else {
-                line_len = 0;   // overflow guard: drop malformed line
+                c.kick_until = 0;   // expired
             }
         }
+
+        bool on = (c.dir != 0) && (duty > 0) &&
+                  (phase < (unsigned long)duty * SPWM_PERIOD_US / 255UL);
+        if (on == c.last_on && c.dir == c.last_dir) continue;   // nothing to do
+        c.last_on = on;
+        c.last_dir = c.dir;
+        if (c.dir > 0) {
+            digitalWrite(c.ina, on ? HIGH : LOW);
+            digitalWrite(c.inb, LOW);
+        } else if (c.dir < 0) {
+            digitalWrite(c.ina, LOW);
+            digitalWrite(c.inb, on ? HIGH : LOW);
+        } else {
+            digitalWrite(c.ina, LOW);
+            digitalWrite(c.inb, LOW);
+        }
     }
 }
 
-// ─── Setup ─────────────────────────────────────────────────────────────────
+void spwmDelay(unsigned long ms) {
+    unsigned long t0 = millis();
+    while (millis() - t0 < ms) spwmTick();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Motor primitives
+// ───────────────────────────────────────────────────────────────────────────
+void setWheels(int fl, int fr, int rl, int rr) {
+    int v[4] = {fl, fr, rl, rr};
+    for (uint8_t i = 0; i < 4; i++) {
+        int p = v[i];
+        if (p > 255)  p = 255;
+        if (p < -255) p = -255;
+        int8_t  new_dir  = (p > 0) ? 1 : (p < 0 ? -1 : 0);
+        uint8_t new_duty = (uint8_t)(p < 0 ? -p : p);
+
+        // Kick only on a genuine standing start or a direction reversal —
+        // /cmd_vel re-sends at 20 Hz, so re-arming every call would leave the
+        // channel permanently at KICK_PWM and destroy speed control.
+        if (new_dir != 0 && (CH[i].dir == 0 || CH[i].dir != new_dir))
+            CH[i].kick_until = millis() + KICK_MS;
+
+        CH[i].dir  = new_dir;
+        CH[i].duty = new_duty;
+    }
+}
+
+void stopAll() {
+    setWheels(0, 0, 0, 0);
+    spwmTick();
+}
+
+void setSides(int pwm_l, int pwm_r) {
+#if INVERT_LEFT
+    pwm_l = -pwm_l;
+#endif
+#if INVERT_RIGHT
+    pwm_r = -pwm_r;
+#endif
+    // one board per side: both left channels on the LEFT driver, both right
+    // channels on the RIGHT driver — see the wiring header.
+    setWheels(pwm_l, pwm_r, pwm_l, pwm_r);
+}
+
+// Map a wheel-linear-velocity (m/s) to a signed PWM.
+//
+// Earlier versions clamped anything below MIN_PWM *up* to MIN_PWM. That made
+// the whole bottom third of the velocity range collapse onto one PWM value, so
+// ramping the command produced no change at the wheels and then a jump — which
+// is exactly the "sudden, not smooth" behaviour. Instead, REMAP: the usable
+// velocity range spans MIN_PWM..255 continuously, so every change in commanded
+// velocity produces a proportional change at the wheel.
+int velToPwm(float v) {
+    float mag = v < 0 ? -v : v;
+    if (mag < 0.005f) return 0;             // deadband — genuinely stopped
+    if (mag > MAX_SPEED_MPS) mag = MAX_SPEED_MPS;
+    float frac = mag / MAX_SPEED_MPS;       // 0..1
+    int pwm = MIN_PWM + (int)(frac * (255.0f - MIN_PWM) + 0.5f);
+    if (pwm > 255) pwm = 255;
+    return v < 0 ? -pwm : pwm;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// IMU — MPU6050 / MPU9250, I2C
+// ───────────────────────────────────────────────────────────────────────────
+// Re-initialise the TWI peripheral. The AVR Wire master can be left holding
+// the bus after a transaction that ended without a STOP — a failed
+// endTransmission(false) does exactly that — and every subsequent transfer
+// then NAKs (error 2) even though the device is perfectly healthy. Measured on
+// this rig: reads fail 400/400 after init, and a bare Wire.begin() restores
+// them to 19/20. Cheap to call, so we call it whenever a read fails.
+void i2cRecover() {
+    Wire.end();
+    Wire.begin();
+    Wire.setClock(I2C_CLOCK_HZ);
+}
+
+void mpuWrite(uint8_t reg, uint8_t val) {
+    Wire.beginTransmission(imu_addr);
+    Wire.write(reg);
+    Wire.write(val);
+    Wire.endTransmission();
+}
+
+// Returns 0xFF on a bus error, which is not a valid WHO_AM_I for any part.
+//
+// Tries a repeated start first (the datasheet-correct way, and the only form
+// this rig's part accepts), then falls back to a full stop for the benefit of
+// clones that want it. Keep the order: the fallback must never be the one that
+// silently wins, or burst reads elsewhere will behave differently.
+uint8_t mpuReadReg(uint8_t addr, uint8_t reg) {
+    for (uint8_t stop = 0; stop < 2; stop++) {
+        Wire.beginTransmission(addr);
+        Wire.write(reg);
+        if (Wire.endTransmission(stop ? true : false) != 0) continue;
+        if (Wire.requestFrom(addr, (uint8_t)1) != 1) continue;
+        return Wire.read();
+    }
+    return 0xFF;
+}
+
+// One burst read of accel[3], temp, gyro[3]. Returns false on a bus error so
+// the caller can skip publishing rather than emit zeros — a stuck-at-zero gyro
+// looks to the EKF like a perfectly still robot, which is a dangerous lie.
+// Why the last mpuReadRaw failed: 1..5 = Wire.endTransmission() code,
+// 100+n = requestFrom returned n bytes instead of 14. 0 = no failure yet.
+uint8_t last_i2c_err = 0;
+
+// Measured behaviour of the MPU6500 clone on this rig, via the `Z` diagnostic:
+//
+//   reads back-to-back with no gap : 20/20
+//   reads with a 5 ms gap between  :  0/20, always err 2 (address NAK)
+//
+// It is not the bus clock (identical at 400/200/100 kHz) and not the software
+// PWM (a bare delay(5) fails the same way). The part simply stops ACKing after
+// a few ms idle and needs to be poked awake — the FIRST transaction after a
+// gap is the one that gets NAKed, and an immediate retry then succeeds.
+//
+// So: retry immediately, several times, with no delay in between. Do NOT add
+// a delay between attempts and do NOT call Wire.end()/begin() here — both were
+// tried and both make it worse, turning a one-shot NAK into a dead bus.
+#define MPU_READ_TRIES 4
+
+bool mpuReadRawOnce(int16_t *accel, int16_t *gyro) {
+    Wire.beginTransmission(imu_addr);
+    Wire.write(MPU_REG_DATA);
+    // Repeated start, per the datasheet.
+    uint8_t err = Wire.endTransmission(false);
+    if (err != 0) { last_i2c_err = err; return false; }
+    uint8_t got = Wire.requestFrom(imu_addr, (uint8_t)14);
+    if (got != 14) { last_i2c_err = 100 + got; return false; }
+    // Each 16-bit word is read into named locals first. Writing
+    // `(Wire.read() << 8) | Wire.read()` would be a byte-order bug: the
+    // evaluation order of the two operands is unspecified in C++, so the
+    // compiler is free to fetch the low byte first.
+    for (uint8_t i = 0; i < 3; i++) {
+        uint8_t hi = Wire.read(), lo = Wire.read();
+        accel[i] = (int16_t)(((uint16_t)hi << 8) | lo);
+    }
+    Wire.read(); Wire.read();          // temperature — unused
+    for (uint8_t i = 0; i < 3; i++) {
+        uint8_t hi = Wire.read(), lo = Wire.read();
+        gyro[i] = (int16_t)(((uint16_t)hi << 8) | lo);
+    }
+    return true;
+}
+
+bool mpuReadRaw(int16_t *accel, int16_t *gyro) {
+    for (uint8_t t = 0; t < MPU_READ_TRIES; t++)
+        if (mpuReadRawOnce(accel, gyro)) return true;
+    return false;
+}
+
+// Probe both addresses, wake the part and configure it. Sets imu_addr on
+// success; everything else no-ops while it stays 0, so a missing or unplugged
+// IMU degrades to exactly the v9 behaviour instead of hanging the board.
+void imuInit() {
+    const uint8_t addrs[2] = {MPU_ADDR_A, MPU_ADDR_B};
+    for (uint8_t i = 0; i < 2; i++) {
+        uint8_t who = mpuReadReg(addrs[i], MPU_REG_WHOAMI);
+        // 0x68 MPU6050 · 0x70 MPU6500 · 0x71 MPU9250 · 0x73 MPU9255
+        if (who == 0x68 || who == 0x70 || who == 0x71 || who == 0x73) {
+            imu_addr = addrs[i];
+            const char *name = (who == 0x68) ? "MPU6050"
+                             : (who == 0x70) ? "MPU6500"
+                             : (who == 0x71) ? "MPU9250" : "MPU9255";
+            // Wake from sleep and clock off the X gyro PLL — more stable than
+            // the internal 8 MHz oscillator the part boots with.
+            mpuWrite(MPU_REG_PWR1,   0x01);
+            delay(50);
+            // DLPF 3: ~44 Hz accel / 42 Hz gyro. The low-pass matters on a
+            // skid-steer — wheel scrub puts a lot of high-frequency chatter
+            // into the chassis that would otherwise reach the EKF as noise.
+            mpuWrite(MPU_REG_CONFIG, 0x03);
+            mpuWrite(MPU_REG_SMPLRT, 0x13);   // 1 kHz / (1+19) = 50 Hz
+            mpuWrite(MPU_REG_GYRO,   0x00);   // ±250 °/s
+            mpuWrite(MPU_REG_ACCEL,  0x00);   // ±2 g
+            delay(50);
+            // Clear any bus state left by the config writes before the first
+            // burst read — see i2cRecover().
+            i2cRecover();
+            Serial.print(F("S,IMU,"));
+            Serial.print(name);
+            Serial.print(F(",0x"));
+            Serial.println(imu_addr, HEX);
+            return;
+        }
+    }
+    Serial.println(F("E,no MPU found at 0x68/0x69 — check SDA=D20 SCL=D21"));
+}
+
+// Average the gyro at rest and store the result as a bias. The robot MUST be
+// stationary. Motors are stopped first so their vibration does not poison the
+// average, and the caller is expected not to be driving.
+void gyroCalibrate() {
+    if (!imu_addr) {
+        Serial.println(F("E,gyro cal skipped — no IMU"));
+        return;
+    }
+    stopAll();
+    float sum[3] = {0.0f, 0.0f, 0.0f};
+    uint16_t got = 0;
+    int16_t a[3], g[3];
+
+    for (uint16_t i = 0; i < GYRO_CAL_SAMPLES; i++) {
+        if (mpuReadRaw(a, g)) {
+            for (uint8_t k = 0; k < 3; k++) sum[k] += (float)g[k];
+            got++;
+        }
+        spwmDelay(5);
+    }
+    if (got < GYRO_CAL_SAMPLES / 2) {
+        Serial.print(F("E,gyro cal failed — got "));
+        Serial.print(got);
+        Serial.print('/');
+        Serial.print(GYRO_CAL_SAMPLES);
+        Serial.print(F(" samples, last i2c err "));
+        Serial.println(last_i2c_err);
+        return;
+    }
+    for (uint8_t k = 0; k < 3; k++)
+        gyro_bias[k] = (sum[k] / got) / GYRO_LSB_PER_DPS * DEG2RAD;
+    Serial.print(F("S,GYROCAL,"));
+    Serial.print(gyro_bias[0], 5); Serial.print(',');
+    Serial.print(gyro_bias[1], 5); Serial.print(',');
+    Serial.println(gyro_bias[2], 5);
+}
+
+// Sample and emit one `I,` line if it is time. Non-blocking apart from the
+// ~350 us I2C burst.
+void imuTick() {
+    if (!imu_addr) return;
+    unsigned long now = millis();
+    if ((long)(now - imu_next_ms) < 0) return;
+    imu_next_ms = now + IMU_PERIOD_MS;
+
+    // Never let a full TX buffer stall the PWM loop — drop the sample instead.
+    // A 40-byte line needs 40 bytes of headroom.
+    if (Serial.availableForWrite() < 48) return;
+
+    int16_t a[3], g[3];
+    if (!mpuReadRaw(a, g)) return;
+
+    float acc[3], gyr[3];
+    for (uint8_t k = 0; k < 3; k++) {
+        acc[k] = (float)a[k] / ACCEL_LSB_PER_G * GRAVITY;
+        gyr[k] = (float)g[k] / GYRO_LSB_PER_DPS * DEG2RAD - gyro_bias[k];
+    }
+
+    const uint8_t src[3] = {IMU_AXIS_X_SRC, IMU_AXIS_Y_SRC, IMU_AXIS_Z_SRC};
+    const float   sgn[3] = {IMU_AXIS_X_SGN, IMU_AXIS_Y_SGN, IMU_AXIS_Z_SGN};
+
+    Serial.print(F("I,"));
+    for (uint8_t k = 0; k < 3; k++) {
+        Serial.print(acc[src[k]] * sgn[k], 4);
+        Serial.print(',');
+    }
+    for (uint8_t k = 0; k < 3; k++) {
+        Serial.print(gyr[src[k]] * sgn[k], 5);
+        if (k < 2) Serial.print(',');
+    }
+    Serial.println();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Ultrasonic — HC-SR04, fully non-blocking
+//
+// Deliberately NOT pulseIn(): that busy-waits for up to 30 ms, which is five
+// software-PWM periods and would visibly stutter the motors. Polling the echo
+// pin from loop() costs nothing and loses no useful precision — sound covers
+// 1 cm in 58 us, far longer than one loop iteration.
+// ───────────────────────────────────────────────────────────────────────────
+void sonarReport(float metres) {
+    if (Serial.availableForWrite() < 16) return;
+    Serial.print(F("U,"));
+    Serial.println(metres, 3);
+}
+
+void sonarTick() {
+    unsigned long now_us = micros();
+
+    switch (sonar_state) {
+    case SONAR_IDLE:
+        if ((long)(millis() - sonar_next_ms) < 0) return;
+        // 10 us trigger pulse. Blocking, but it is 0.17% of a PWM period.
+        digitalWrite(SONAR_TRIG, LOW);
+        delayMicroseconds(2);
+        digitalWrite(SONAR_TRIG, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(SONAR_TRIG, LOW);
+        sonar_phase_us = micros();
+        // Schedule the next ping from the TRIGGER, not from echo completion.
+        // Measuring a far object holds the echo high for ~15 ms, which would
+        // otherwise stretch the period to 80 ms and drop the rate to ~12 Hz.
+        sonar_next_ms = millis() + SONAR_PERIOD_MS;
+        sonar_state = SONAR_WAIT_RISE;
+        break;
+
+    case SONAR_WAIT_RISE:
+        if (digitalRead(SONAR_ECHO) == HIGH) {
+            sonar_echo_start_us = now_us;
+            sonar_state = SONAR_WAIT_FALL;
+        } else if (now_us - sonar_phase_us > SONAR_RISE_TIMEOUT_US) {
+            // Sensor never raised echo — unplugged or dead. Report no-echo;
+            // the bridge turns -1 into max_range so the costmap CLEARS rather
+            // than blocking, and its safety clamp ignores stale readings.
+            sonarReport(-1.0f);
+            sonar_state = SONAR_IDLE;
+        }
+        break;
+
+    case SONAR_WAIT_FALL:
+        if (digitalRead(SONAR_ECHO) == LOW) {
+            unsigned long width = now_us - sonar_echo_start_us;
+            float m = (float)width * SPEED_OF_SOUND / 2.0f / 1000000.0f;
+            sonarReport(m > SONAR_MAX_M ? -1.0f : m);
+            sonar_state = SONAR_IDLE;
+        } else if (now_us - sonar_echo_start_us > SONAR_ECHO_TIMEOUT_US) {
+            // Echo still high past the max-range flight time: nothing within
+            // range. Report no-echo instead of waiting out the sensor's own
+            // ~38 ms timeout, which would halve the update rate.
+            sonarReport(-1.0f);
+            sonar_state = SONAR_IDLE;
+        }
+        break;
+
+    default:
+        sonar_state = SONAR_IDLE;
+        break;
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Sensor diagnostics — `Z` command
+//
+// Answers the two questions you actually have when a sensor is silent:
+// "is ANYTHING on the I2C bus?" and "is the echo pin doing anything at all?".
+// Distinguishes a wiring/power fault from a wrong-address or dead-part fault.
+// ───────────────────────────────────────────────────────────────────────────
+void diagI2C() {
+    // Idle level of the bus lines with pull-ups engaged. Both should read
+    // HIGH. A line stuck LOW means no pull-up, a short, or a wedged device;
+    // that is a wiring fault, not an addressing one.
+    pinMode(SDA, INPUT_PULLUP);
+    pinMode(SCL, INPUT_PULLUP);
+    delayMicroseconds(50);
+    int sda = digitalRead(SDA), scl = digitalRead(SCL);
+    Serial.print(F("E,DIAG i2c idle SDA="));
+    Serial.print(sda ? F("HIGH") : F("LOW (fault)"));
+    Serial.print(F(" SCL="));
+    Serial.println(scl ? F("HIGH") : F("LOW (fault)"));
+    Wire.begin();
+    Wire.setClock(I2C_CLOCK_HZ);
+
+    uint8_t found = 0;
+    for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) {
+            Serial.print(F("E,DIAG i2c device at 0x"));
+            Serial.println(a, HEX);
+            found++;
+        }
+    }
+    Serial.print(F("E,DIAG i2c devices found: "));
+    Serial.println(found);
+
+    // Raw WHO_AM_I from both candidate addresses. If a device answered the
+    // scan above but reports an ID we do not recognise, this is the number
+    // that tells us what to add to imuInit()'s accept list.
+    for (uint8_t i = 0; i < 2; i++) {
+        uint8_t a = i ? MPU_ADDR_B : MPU_ADDR_A;
+        Serial.print(F("E,DIAG whoami 0x"));
+        Serial.print(a, HEX);
+        Serial.print(F(" -> 0x"));
+        Serial.println(mpuReadReg(a, MPU_REG_WHOAMI), HEX);
+    }
+
+    // Burst-read reliability against what happens BETWEEN reads. Reads that
+    // work back-to-back but fail when spaced apart point at an interaction
+    // with whatever runs in the gap, not at the bus itself.
+    if (imu_addr) {
+        int16_t a[3], g[3];
+        for (uint8_t mode = 0; mode < 3; mode++) {
+            uint8_t ok = 0;
+            for (uint8_t i = 0; i < 20; i++) {
+                if (mpuReadRaw(a, g)) ok++;
+                if (mode == 1) delay(5);         // plain delay
+                else if (mode == 2) spwmDelay(5); // delay + software PWM
+            }
+            Serial.print(F("E,DIAG burst gap="));
+            Serial.print(mode == 0 ? F("none") : (mode == 1 ? F("delay") : F("spwm")));
+            Serial.print(F(": "));
+            Serial.print(ok);
+            Serial.print(F("/20 lasterr="));
+            Serial.println(last_i2c_err);
+        }
+    }
+}
+
+// One blocking ping on an arbitrary trig/echo pair. Blocking is fine here: Z
+// is a bench command and the motors are stopped. Returns the echo width in us,
+// or 0 for no echo.
+unsigned long diagPing(uint8_t trig, uint8_t echo) {
+    pinMode(trig, OUTPUT);
+    pinMode(echo, INPUT);
+    digitalWrite(trig, LOW);
+    delayMicroseconds(4);
+    digitalWrite(trig, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trig, LOW);
+
+    unsigned long t0 = micros();
+    while (digitalRead(echo) == LOW)
+        if (micros() - t0 > 50000UL) return 0;
+    unsigned long rise = micros();
+    while (digitalRead(echo) == HIGH)
+        if (micros() - rise > 60000UL) return 0;
+    return micros() - rise;
+}
+
+void diagSonar() {
+    stopAll();
+    pinMode(SONAR_ECHO, INPUT);
+    Serial.print(F("E,DIAG echo(D41) idle="));
+    Serial.println(digitalRead(SONAR_ECHO) ? F("HIGH (stuck?)") : F("LOW (ok)"));
+
+    // Try the configured orientation, then the swap. TRIG and ECHO being
+    // crossed is by far the most common HC-SR04 wiring mistake and costs one
+    // extra ping to rule in or out.
+    struct { uint8_t trig, echo; const char *label; } tries[] = {
+        {SONAR_TRIG, SONAR_ECHO, "TRIG=D40 ECHO=D41 (configured)"},
+        {SONAR_ECHO, SONAR_TRIG, "TRIG=D41 ECHO=D40 (swapped)"},
+    };
+    for (uint8_t i = 0; i < 2; i++) {
+        unsigned long w = diagPing(tries[i].trig, tries[i].echo);
+        Serial.print(F("E,DIAG ping "));
+        Serial.print(tries[i].label);
+        if (w) {
+            Serial.print(F(" -> width="));
+            Serial.print(w);
+            Serial.print(F("us = "));
+            Serial.print((float)w * SPEED_OF_SOUND / 2.0f / 1000000.0f, 3);
+            Serial.println(F(" m"));
+        } else {
+            Serial.println(F(" -> NO ECHO"));
+        }
+        delay(60);
+    }
+    // Restore the configured direction so the running state machine is sane.
+    pinMode(SONAR_TRIG, OUTPUT);
+    pinMode(SONAR_ECHO, INPUT);
+    digitalWrite(SONAR_TRIG, LOW);
+}
+
+void runDiag() {
+    Serial.println(F("E,DIAG start"));
+    diagI2C();
+    diagSonar();
+    Serial.println(F("E,DIAG done"));
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Command handling
+// ───────────────────────────────────────────────────────────────────────────
+void handleDrive(char *args) {
+    char *lin_s = strtok(args, ",");
+    char *ang_s = strtok(NULL, ",");
+    if (!lin_s || !ang_s) {
+        Serial.println(F("E,bad V command"));
+        return;
+    }
+    float lin = atof(lin_s);
+    float ang = atof(ang_s);
+
+    // Skid-steer mix about an effective (scrub-compensated) half-track.
+    // Positive ang = turn left = right side faster forward, left side slower.
+    // Gain blends from pivot authority (stopped) to arc gain (rolling).
+    float alin = lin < 0 ? -lin : lin;
+    float pivot_frac = 1.0f - (alin / PIVOT_LIN_REF);
+    if (pivot_frac < 0.0f) pivot_frac = 0.0f;
+    if (pivot_frac > 1.0f) pivot_frac = 1.0f;
+    float gain = TURN_GAIN + pivot_frac * (TURN_GAIN_PIVOT - TURN_GAIN);
+    float half_track = (WHEEL_SEP / 2.0f) * gain;
+    float v_l = lin - ang * half_track;
+    float v_r = lin + ang * half_track;
+
+    // If the mix exceeds full speed, scale BOTH sides by the same factor
+    // rather than clipping one. Clipping would flatten the speed difference
+    // and turn a commanded arc into a straight line at high forward speed.
+    float pk_l = v_l < 0 ? -v_l : v_l;
+    float pk_r = v_r < 0 ? -v_r : v_r;
+    float peak = pk_l > pk_r ? pk_l : pk_r;
+    if (peak > MAX_SPEED_MPS) {
+        float k = MAX_SPEED_MPS / peak;
+        v_l *= k;
+        v_r *= k;
+    }
+
+    raw_mode = false;
+    last_cmd_ms = millis();
+    int pwm_l = velToPwm(v_l);
+    int pwm_r = velToPwm(v_r);
+    setSides(pwm_l, pwm_r);
+
+    // Diagnostic echo: report what actually arrived, but only when it CHANGES
+    // (V arrives at 20 Hz, so echoing every one would flood the link).
+    // arduino_bridge logs 'E' lines as warnings, so these land in the launch
+    // log and prove whether ROS commands are reaching the board at all.
+    static float last_lin = 9e9f, last_ang = 9e9f;
+    if (fabs(lin - last_lin) > 0.001f || fabs(ang - last_ang) > 0.001f) {
+        last_lin = lin;
+        last_ang = ang;
+        Serial.print(F("E,RX lin="));
+        Serial.print(lin, 3);
+        Serial.print(F(" ang="));
+        Serial.print(ang, 3);
+        Serial.print(F(" pwmL="));
+        Serial.print(pwm_l);
+        Serial.print(F(" pwmR="));
+        Serial.println(pwm_r);
+    }
+}
+
+void handleRaw(char *args) {
+    char *l_s = strtok(args, ",");
+    char *r_s = strtok(NULL, ",");
+    if (!l_s || !r_s) {
+        Serial.println(F("E,bad M command"));
+        return;
+    }
+    raw_mode = true;
+    last_cmd_ms = millis();
+    setSides(atoi(l_s), atoi(r_s));
+}
+
+void handleWheels(char *args) {
+    int v[4];
+    for (uint8_t i = 0; i < 4; i++) {
+        char *tok = strtok(i == 0 ? args : NULL, ",");
+        if (!tok) {
+            Serial.println(F("E,bad W command"));
+            return;
+        }
+        v[i] = atoi(tok);
+    }
+    raw_mode = true;
+    last_cmd_ms = millis();
+    setWheels(v[0], v[1], v[2], v[3]);
+}
+
+// Retained for compatibility with motortest.py's `enall` mode. With v5 the
+// enables are always DC high, so this is now just "wheel N at full".
+void handleEnableAll(char *args) {
+    int w = atoi(args);
+    if (w < 0 || w > 3) { Serial.println(F("E,usage Y,<0-3>")); return; }
+    int v[4] = {0, 0, 0, 0};
+    v[w] = 255;
+    raw_mode = true;
+    last_cmd_ms = millis();
+    setWheels(v[0], v[1], v[2], v[3]);
+    Serial.print(F("S,ENALL,wheel="));
+    Serial.println(w);
+}
+
+// Self-contained demo. Needs no host loop — send X once and watch.
+void runDemo() {
+    struct Step { int fl, fr, rl, rr; const char *label; };
+    static const Step STEPS[] = {
+        { 200,   0,   0,   0, "front-left"  },
+        {   0, 200,   0,   0, "front-right" },
+        {   0,   0, 200,   0, "rear-left"   },
+        {   0,   0,   0, 200, "rear-right"  },
+        { 200, 200, 200, 200, "all forward" },
+        {-200,-200,-200,-200, "all reverse" },
+    };
+    Serial.println(F("S,DEMO,start"));
+    for (uint8_t i = 0; i < sizeof(STEPS) / sizeof(STEPS[0]); i++) {
+        Serial.print(F("S,DEMO,"));
+        Serial.println(STEPS[i].label);
+        setWheels(STEPS[i].fl, STEPS[i].fr, STEPS[i].rl, STEPS[i].rr);
+        spwmDelay(2000);
+        stopAll();
+        spwmDelay(800);
+    }
+    Serial.println(F("S,DEMO,done"));
+    raw_mode = false;
+    last_cmd_ms = millis();
+}
+
+void handleLine(char *line) {
+    switch (line[0]) {
+        case 'V': if (line[1] == ',') handleDrive(line + 2);     break;
+        case 'M': if (line[1] == ',') handleRaw(line + 2);       break;
+        case 'W': if (line[1] == ',') handleWheels(line + 2);    break;
+        case 'Y': if (line[1] == ',') handleEnableAll(line + 2); break;
+        case 'X': runDemo();                                     break;
+        case 'S':
+            raw_mode = false;
+            stopAll();
+            break;
+        case 'P':
+            Serial.println(F("S,PONG"));
+            break;
+        case 'G':
+            gyroCalibrate();
+            break;
+        case 'Z':
+            runDiag();
+            break;
+        case 'O':   // doors — not fitted
+        case 'C':
+        case 'L':   // LCD — not fitted
+            break;
+        default:
+            Serial.print(F("E,unknown cmd "));
+            Serial.println(line[0]);
+            break;
+    }
+}
+
+void readSerial() {
+    while (Serial.available()) {
+        char c = Serial.read();
+        if (c == '\n' || c == '\r') {
+            if (line_len > 0) {
+                line_buf[line_len] = '\0';
+                handleLine(line_buf);
+                line_len = 0;
+            }
+        } else if (line_len < LINE_BUF_LEN - 1) {
+            line_buf[line_len++] = c;
+        } else {
+            line_len = 0;   // overrun — drop the line
+            Serial.println(F("E,line overrun"));
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 void setup() {
-    const uint8_t motor_pins[] = {FL_EN, FL_INA, FL_INB, RL_EN, RL_INA,
-                                  RL_INB, FR_EN, FR_INA, FR_INB, RR_EN,
-                                  RR_INA, RR_INB};
-    for (uint8_t i = 0; i < sizeof(motor_pins); i++)
-        pinMode(motor_pins[i], OUTPUT);
-    stopMotors();
+    for (uint8_t i = 0; i < 4; i++) {
+        pinMode(CH[i].en,  OUTPUT);
+        pinMode(CH[i].ina, OUTPUT);
+        pinMode(CH[i].inb, OUTPUT);
+        digitalWrite(CH[i].ina, LOW);
+        digitalWrite(CH[i].inb, LOW);
+        // Enables are parked HIGH for the whole run. Both INs low is brake, so
+        // nothing turns until a command arrives.
+        digitalWrite(CH[i].en, HIGH);
+    }
+    stopAll();
 
     pinMode(SONAR_TRIG, OUTPUT);
     pinMode(SONAR_ECHO, INPUT);
-    pinMode(IR_PIN, INPUT_PULLUP);
+    digitalWrite(SONAR_TRIG, LOW);
 
     Serial.begin(SERIAL_BAUD);
+    delay(200);
+
+    // 400 kHz keeps the 14-byte burst read near 350 us. At the default
+    // 100 kHz it would be ~1.4 ms — a quarter of a PWM period, every 20 ms.
     Wire.begin();
-    Wire.setClock(400000);
+    Wire.setClock(I2C_CLOCK_HZ);
+    // NOTE: deliberately NOT calling Wire.setWireTimeout() here.
+    //
+    // It looks like cheap insurance against a wedged bus, but measured on this
+    // rig it BREAKS the IMU: with a timeout armed, the 14-byte burst read fails
+    // essentially every time (gyro calibration collected <50% of its samples
+    // and imuTick published nothing at all), while the identical code with no
+    // timeout scores 19/20. The `Z` diagnostic only appeared healthy because
+    // it re-calls Wire.begin(), which clears the timeout setting.
+    //
+    // A hung bus is the rarer and more visible failure — and mpuReadRaw already
+    // returns false on any error, so a genuinely dead bus degrades to "no IMU"
+    // rather than corrupt data.
+    imuInit();
+    gyroCalibrate();       // robot must be stationary at power-up
 
-    SPI.begin();
-    rfid.PCD_Init();
-    // Version reg reads 0x00/0xFF when the reader is absent/miswired
-    byte ver = rfid.PCD_ReadRegister(MFRC522::VersionReg);
-    rfid_ok = (ver != 0x00 && ver != 0xFF);
-    if (!rfid_ok) Serial.println(F("E,RFID_NOT_FOUND"));
-
-    Wire.beginTransmission(LCD_ADDR);
-    lcd_ok = (Wire.endTransmission() == 0);
-    if (lcd_ok) {
-        lcd.init();
-        lcd.backlight();
-        lcdLine2("OfficeMate " FW_VERSION);
-    } else {
-        Serial.println(F("E,LCD_NOT_FOUND"));
-    }
-
-    ina_ok = inaInit();
-    if (!ina_ok) Serial.println(F("E,INA219_NOT_FOUND"));
-
-    mpu_ok = mpuInit();
-    if (mpu_ok) {
-        mpuCalibrateGyro();     // ~1 s, robot must be stationary
-    } else {
-        Serial.println(F("E,MPU6050_NOT_FOUND"));
-    }
-
-    // Doors start closed
-    door_l.attach(DOOR_L_PIN); door_r.attach(DOOR_R_PIN);
-    door_l.write(DOOR_L_CLOSED); door_r.write(DOOR_R_CLOSED);
-    door_settle_ms = millis();
-
+    Serial.print(F("S,READY,"));
+    Serial.println(F(FW_VERSION));
     last_cmd_ms = millis();
-    Serial.println(F("S,READY," FW_VERSION));
+    imu_next_ms = millis();
+    sonar_next_ms = millis();
 }
 
-// ─── Loop ──────────────────────────────────────────────────────────────────
 void loop() {
-    unsigned long now = millis();
+    readSerial();
+    spwmTick();
+    imuTick();
+    spwmTick();
+    sonarTick();
 
-    pollSerial();
-
-    if (now - last_cmd_ms > CMD_TIMEOUT_MS) stopMotors();
-
-    if (mpu_ok && now - t_imu >= IMU_PERIOD_MS) {
-        t_imu = now;
-        publishImu();
-    }
-    if (now - t_sonar >= SONAR_PERIOD_MS) {
-        t_sonar = now;
-        publishSonar();
-    }
-    if (now - t_ir >= IR_PERIOD_MS) {
-        t_ir = now;
-        pollIr();
-    }
-    if (now - t_rfid >= RFID_PERIOD_MS) {
-        t_rfid = now;
-        pollRfid();
-    }
-    if (ina_ok && now - t_batt >= BATT_PERIOD_MS) {
-        t_batt = now;
-        float volts, amps;
-        if (readBattery(&volts, &amps)) {
-            Serial.print(F("B,"));
-            Serial.print(volts, 2); Serial.print(',');
-            Serial.println(amps, 2);
-            lcdBattLine(volts, amps);
-        }
-    }
-    if (now - t_door >= DOOR_PERIOD_MS) {
-        t_door = now;
-        updateDoors();
+    // Watchdog: stop if the host goes quiet. Raw M/W/Y commands latch for
+    // bench testing and are exempt — send S (or reset) to clear.
+    if (!raw_mode && (millis() - last_cmd_ms) > CMD_TIMEOUT_MS) {
+        stopAll();
+        last_cmd_ms = millis();   // re-arm so we brake once, not every pass
     }
 }
