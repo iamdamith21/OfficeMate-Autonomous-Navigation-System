@@ -221,9 +221,20 @@
 // output. That is a bang-bang controller — the robot slams into the turn and
 // cannot modulate, which reads as "jerky" no matter what the smoother does.
 //
-// At 8.0 the whole 0 -> 0.50 rad/s range maps onto MIN_PWM -> 255, so the
-// controller gets a genuine proportional band and turns come out smooth.
-#define TURN_GAIN_PIVOT  8.0f
+// MEASURED AND CORRECTED 2026-07-27 (turntest.py, gyro as ground truth).
+// The theoretical 8.0 restored the proportional band -- saturation gone,
+// response monotonic -- but over-rotated at the top: 0.50 rad/s commanded
+// produced 0.651 achieved (ratio 1.30), because the battery is healthier than
+// when the original 0.22 rad/s full-PWM ceiling was measured. Nav2's
+// controllers assume commanded ~= achieved, so a 30% overshoot shows up as
+// heading oscillation on every rotate-to-heading.
+//
+// Scaled down to bring the working band (0.35-0.50 rad/s, where the rotation
+// shim and the angular ceiling both live) onto ratio ~1.0. The response is not
+// perfectly linear -- MIN_PWM's offset lifts the low end while stiction drags
+// it back down -- so this trades a little accuracy at 0.15 rad/s, which the
+// planner rarely asks for, for accuracy where it matters.
+#define TURN_GAIN_PIVOT  6.5f
 #define PIVOT_LIN_REF   0.10f
 
 // ─── Stiction kick ─────────────────────────────────────────────────────────

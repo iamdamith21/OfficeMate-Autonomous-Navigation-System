@@ -248,9 +248,15 @@ local_costmap:
         topics: ["/ultrasonic/range"]
         phi: 1.2
         inflate_cone: 1.0
-        # Clear the layer if the sensor goes quiet for 2 s rather than leaving
-        # a stale phantom obstacle on the costmap forever if the Arduino drops.
-        no_readings_timeout: 2.0
+        # MUST stay 0.0 (check disabled). A non-zero timeout makes
+        # RangeSensorLayer mark itself NOT CURRENT whenever the sonar pauses,
+        # which makes the whole local costmap stale, and controller_server then
+        # aborts follow_path every cycle -- silently, with no exception logged.
+        # Symptom: the planner produces a good path, the robot never moves, and
+        # nothing in the log says why. A brief sonar gap must never be able to
+        # immobilise the robot; the forward-stop clamp in arduino_bridge is the
+        # safety net for a genuinely dead sensor.
+        no_readings_timeout: 0.0
         clear_threshold: 0.2
         mark_threshold: 0.8
         clear_on_max_reading: true
@@ -309,10 +315,17 @@ global_costmap:
 
       # KeepoutFilter reads from /costmap_filter_info (published by
       # costmap_filter_info_server when use_keepout_filter:=true).
-      # Safe to leave enabled — if info server not running it no-ops.
+      #
+      # DISABLED by default 2026-07-27. The old comment claimed it "no-ops" if
+      # the info server is not running — it does not: it logs
+      # "KeepoutFilter: Filter mask was not received" every 2 s forever, which
+      # buries real planner warnings in the log. navigation.launch.py only
+      # starts the info server when use_keepout_filter:=true, so the default
+      # path was always the noisy one. Turn this back on together with that
+      # launch argument.
       keepout_filter:
         plugin: "nav2_costmap_2d::KeepoutFilter"
-        enabled: true
+        enabled: false
         filter_info_topic: "/costmap_filter_info"
 
 # ── Map server (navigation map) ───────────────────────────────────────────────
@@ -349,7 +362,7 @@ behavior_server:
     wait:
       plugin: "nav2_behaviors/Wait"
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.50
+    max_rotational_vel: 0.45   # matches the smoother's measured-honest ceiling
     min_rotational_vel: 0.08
     rotational_acc_lim: 1.5
 
@@ -378,8 +391,15 @@ velocity_smoother:
     # controller limits above are pointless without raising it here too.
     # Linear stays conservative: 0.15 m/s tracked to within 2% on this robot
     # but 0.22 m/s was erratic, so 0.20 is the honest ceiling.
-    max_velocity: [ 0.20, 0.0,  0.50]
-    min_velocity: [-0.20, 0.0, -0.50]
+    # Angular ceiling is 0.45, not 0.50, and that is a measured choice.
+    # turntest.py (gyro as ground truth, 2026-07-27) gave achieved/commanded:
+    #   0.15 -> 0.87   0.25 -> 0.86   0.35 -> 0.87   0.45 -> 1.02   0.50 -> 1.19
+    # The response stays honest up to 0.45 and then runs away. Nav2's
+    # controllers assume commanded ~= achieved, so operating in the 1.19 region
+    # buys nothing but heading overshoot. rotate_to_heading_angular_vel is
+    # 0.45 anyway, so nothing is lost -- and it is still 2.25x the old 0.20.
+    max_velocity: [ 0.20, 0.0,  0.45]
+    min_velocity: [-0.20, 0.0, -0.45]
     # Accel limits are what make the motion SMOOTH rather than stepped. The
     # controller runs at only 5 Hz on the Pi, so the smoother's 20 Hz ramp is
     # doing most of the work of turning 5 Hz staircase commands into
