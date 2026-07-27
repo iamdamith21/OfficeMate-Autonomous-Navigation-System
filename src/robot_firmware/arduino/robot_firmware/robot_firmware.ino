@@ -4,10 +4,19 @@
  * Board : Arduino Mega 2560
  * Libs  : Wire (core only — no MPU/Servo/LCD libraries needed)
  *
- * Fitted: the two L298N motor drivers, an MPU6050-or-MPU9250 IMU on I2C, and
- * an HC-SR04 ultrasonic on TRIG=D40 / ECHO=D41. Still NOT fitted: MFRC522,
- * LCD, INA219, IR, door servos — so the bridge's RFID / IR / battery / door
- * publishers stay silent and O/C/L remain accepted-and-ignored.
+ * Fitted: the two L298N motor drivers, an MPU6050-or-MPU9250 IMU, an INA219
+ * power monitor and a 20x4 LCD (all on I2C), plus an HC-SR04 ultrasonic on
+ * TRIG=D40 / ECHO=D41. Still NOT fitted: MFRC522, IR, door servos — so the
+ * bridge's RFID / IR / door publishers stay silent and O/C are ignored.
+ *
+ * ─── v10.1: INA219 + LCD ──────────────────────────────────────────────────
+ * The LCD is driven by a purpose-written incremental driver rather than
+ * LiquidCrystal_I2C. That library writes a whole line per blocking call —
+ * several milliseconds, most of a software-PWM period — and the motors would
+ * stutter on every refresh. Here a shadow buffer is diffed against the target
+ * and exactly ONE changed character is pushed per 3 ms tick, so the longest
+ * blocking I2C burst is a single character (~135 us). A full 80-cell repaint
+ * takes ~240 ms, and a typical update (a few digits) far less.
  *
  * The serial protocol is unchanged from v3.0, so hardware_bridge/arduino_bridge
  * parses `I,` and `U,` lines with no ROS-side edits — those handlers were
@@ -120,11 +129,15 @@
  *    P                         ping → replies "S,PONG"
  *    G                         re-zero the gyro bias (robot must be still)
  *    Z                         sensor diagnostics: I2C scan + one sonar ping
- *    O / C / L,<text>          accepted and ignored (no doors/LCD fitted)
+ *    L,<text>                  text for the bottom LCD row (mission status)
+ *    O / C                     accepted and ignored (no door servos fitted)
  *  Board → Pi:
  *    S,READY,<ver>             boot complete
  *    S,PONG                    ping reply
  *    S,IMU,<name>,0x<addr>     IMU detected at boot
+ *    S,INA219,0x40             power monitor detected
+ *    S,LCD,0x27                display detected
+ *    B,<volts>,<amps>          battery/bus power, 1 Hz
  *    S,GYROCAL,<gx>,<gy>,<gz>  gyro bias in rad/s after calibration
  *    I,ax,ay,az,gx,gy,gz       IMU 50 Hz — m/s^2 and rad/s, base_link axes
  *    U,<metres>                ultrasonic ~15 Hz; -1 means no echo
@@ -137,7 +150,7 @@
  *  INVERT_* : flip if a side runs backwards.
  */
 
-#define FW_VERSION "v10.0-imu-sonar"
+#define FW_VERSION "v10.1-ina-lcd"
 
 #include <Wire.h>
 
@@ -299,6 +312,47 @@
 #define IMU_AXIS_Y_SGN  1.0f
 #define IMU_AXIS_Z_SGN  1.0f
 
+// ─── INA219 power monitor ──────────────────────────────────────────────────
+// High-side on the 3S pack: VIN+ from battery+, VIN- to the motor drivers and
+// buck. Measures total draw of everything downstream.
+#define INA_ADDR       0x40
+#define INA_REG_CONFIG 0x00
+#define INA_REG_BUSV   0x02
+#define INA_REG_CURRENT 0x04
+#define INA_REG_CALIB  0x05
+
+// 32 V range, 320 mV shunt, 12-bit, continuous shunt+bus.
+#define INA_CONFIG     0x399F
+// cal = 0.04096 / (current_LSB * R_shunt), with the stock 0.1 ohm shunt and a
+// 100 uA/bit LSB: 0.04096 / (0.0001 * 0.1) = 4096. Full scale is then
+// 32767 * 100uA = 3.27 A -- ABOVE THAT THE CURRENT READING CLIPS. Four motors
+// scrubbing through a skid-steer turn can exceed it. Bus VOLTAGE is measured
+// independently and stays correct regardless, which is what the battery
+// percentage is derived from, so a clipped current reading is not fatal.
+// For honest current under stall, fit a 0.01 ohm shunt and set cal to 40960.
+#define INA_CALIB      4096
+#define INA_CURRENT_LSB 0.0001f   // A per bit
+#define INA_BUSV_LSB    0.004f    // V per bit (register is bits 15..3)
+#define INA_PERIOD_MS  1000       // 1 Hz — battery state changes slowly
+
+// ─── 20x4 I2C LCD (PCF8574 backpack, HD44780 controller) ───────────────────
+// Deliberately NOT LiquidCrystal_I2C: that library writes a whole line in one
+// blocking call, which at ~135 us per character is several milliseconds — most
+// of a software-PWM period, and the motors would stutter every refresh. This
+// driver keeps a shadow buffer and pushes ONE changed character per tick, so
+// the longest blocking I2C burst is a single character.
+#define LCD_ADDR      0x27
+#define LCD_COLS        20
+#define LCD_ROWS         4
+#define LCD_TICK_MS      3   // one character every 3 ms -> ~4.5% I2C duty
+#define LCD_REFRESH_MS 500   // recompute the text twice a second
+
+// PCF8574 pin mapping used by essentially every cheap backpack.
+#define LCD_RS   0x01
+#define LCD_RW   0x02
+#define LCD_EN   0x04
+#define LCD_BL   0x08   // backlight, held on
+
 // ─── Ultrasonic (HC-SR04) ──────────────────────────────────────────────────
 // 15 Hz. Faster than ~20 Hz risks hearing the PREVIOUS ping's echo bouncing
 // back off a far wall and reporting a phantom close obstacle.
@@ -343,6 +397,23 @@ Channel CH[4] = {
 uint8_t       imu_addr = 0;      // 0 = not detected; sensor code no-ops
 float         gyro_bias[3] = {0.0f, 0.0f, 0.0f};   // rad/s, subtracted on read
 unsigned long imu_next_ms = 0;
+
+// INA219 state
+bool          ina_present = false;
+unsigned long ina_next_ms = 0;
+float         ina_volts = 0.0f;
+float         ina_amps = 0.0f;
+
+// LCD state. `want` is what should be on screen, `shown` is what actually is;
+// lcdTick pushes the difference one character at a time.
+bool          lcd_present = false;
+char          lcd_want[LCD_ROWS][LCD_COLS];
+char          lcd_shown[LCD_ROWS][LCD_COLS];
+uint8_t       lcd_scan = 0;        // flat index of the next cell to examine
+int8_t        lcd_cursor_row = -1; // where the HD44780 cursor currently is
+int8_t        lcd_cursor_col = -1;
+unsigned long lcd_next_tick_ms = 0;
+unsigned long lcd_next_refresh_ms = 0;
 
 // Ultrasonic state machine
 enum SonarState { SONAR_IDLE, SONAR_TRIGGER, SONAR_WAIT_RISE, SONAR_WAIT_FALL };
@@ -651,6 +722,217 @@ void imuTick() {
         if (k < 2) Serial.print(',');
     }
     Serial.println();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// INA219 power monitor
+// ───────────────────────────────────────────────────────────────────────────
+bool inaWrite16(uint8_t reg, uint16_t val) {
+    Wire.beginTransmission(INA_ADDR);
+    Wire.write(reg);
+    Wire.write((uint8_t)(val >> 8));
+    Wire.write((uint8_t)(val & 0xFF));
+    return Wire.endTransmission() == 0;
+}
+
+// Same repeated-start form the MPU needs, and the same immediate-retry policy:
+// these two share a bus, and a NAK after an idle gap is a bus-level symptom,
+// not an MPU-specific one.
+bool inaRead16(uint8_t reg, int16_t *out) {
+    for (uint8_t t = 0; t < 3; t++) {
+        Wire.beginTransmission(INA_ADDR);
+        Wire.write(reg);
+        if (Wire.endTransmission(false) != 0) continue;
+        if (Wire.requestFrom(INA_ADDR, (uint8_t)2) != 2) continue;
+        uint8_t hi = Wire.read(), lo = Wire.read();
+        *out = (int16_t)(((uint16_t)hi << 8) | lo);
+        return true;
+    }
+    return false;
+}
+
+void ina219Init() {
+    Wire.beginTransmission(INA_ADDR);
+    if (Wire.endTransmission() != 0) {
+        Serial.println(F("E,no INA219 at 0x40 — battery telemetry disabled"));
+        ina_present = false;
+        return;
+    }
+    // Calibration MUST be written before the current register reads anything
+    // but zero; the chip derives current from the shunt voltage using it.
+    if (!inaWrite16(INA_REG_CALIB, INA_CALIB) ||
+        !inaWrite16(INA_REG_CONFIG, INA_CONFIG)) {
+        Serial.println(F("E,INA219 config write failed"));
+        ina_present = false;
+        return;
+    }
+    ina_present = true;
+    Serial.println(F("S,INA219,0x40"));
+}
+
+void ina219Tick() {
+    if (!ina_present) return;
+    unsigned long now = millis();
+    if ((long)(now - ina_next_ms) < 0) return;
+    ina_next_ms = now + INA_PERIOD_MS;
+    if (Serial.availableForWrite() < 24) return;
+
+    int16_t rawv, rawi;
+    if (!inaRead16(INA_REG_BUSV, &rawv)) return;
+    if (!inaRead16(INA_REG_CURRENT, &rawi)) return;
+
+    // Bus voltage lives in bits 15..3; bit 1 is the conversion-ready flag and
+    // bit 0 the maths-overflow flag, so the shift is not optional.
+    ina_volts = (float)(rawv >> 3) * INA_BUSV_LSB;
+    ina_amps = (float)rawi * INA_CURRENT_LSB;
+
+    Serial.print(F("B,"));
+    Serial.print(ina_volts, 3);
+    Serial.print(',');
+    Serial.println(ina_amps, 3);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// 20x4 LCD over PCF8574 — incremental, never blocks for more than one char
+// ───────────────────────────────────────────────────────────────────────────
+// Push one PCF8574 port state. Everything else is built from this.
+void lcdRaw(uint8_t data) {
+    Wire.beginTransmission(LCD_ADDR);
+    Wire.write(data | LCD_BL);
+    Wire.endTransmission();
+}
+
+// One 8-bit value as two 4-bit nibbles, each strobed by pulsing E. Sent as a
+// single I2C transaction (4 port writes) so the whole character costs one
+// start/stop rather than four — ~135 us instead of ~270 us.
+void lcdSend(uint8_t value, uint8_t mode) {
+    uint8_t hi = (value & 0xF0) | mode | LCD_BL;
+    uint8_t lo = ((value << 4) & 0xF0) | mode | LCD_BL;
+    Wire.beginTransmission(LCD_ADDR);
+    Wire.write(hi | LCD_EN);
+    Wire.write(hi);
+    Wire.write(lo | LCD_EN);
+    Wire.write(lo);
+    Wire.endTransmission();
+}
+
+void lcdCmd(uint8_t c)  { lcdSend(c, 0); }
+void lcdData(uint8_t c) { lcdSend(c, LCD_RS); }
+
+void lcdInit() {
+    Wire.beginTransmission(LCD_ADDR);
+    if (Wire.endTransmission() != 0) {
+        Serial.println(F("E,no LCD at 0x27"));
+        lcd_present = false;
+        return;
+    }
+    delay(50);
+    // HD44780 cold-start into 4-bit mode. These three 0x30 nibbles are the
+    // documented wake-up sequence and are needed regardless of what mode the
+    // controller happened to power up in.
+    lcdRaw(0x00);
+    delay(20);
+    for (uint8_t i = 0; i < 3; i++) {
+        lcdRaw(0x30 | LCD_EN); lcdRaw(0x30);
+        delay(5);
+    }
+    lcdRaw(0x20 | LCD_EN); lcdRaw(0x20);   // now switch to 4-bit
+    delay(5);
+
+    lcdCmd(0x28);  delay(2);   // 4-bit, 2-line mode, 5x8 font
+    lcdCmd(0x0C);  delay(2);   // display on, cursor off, blink off
+    lcdCmd(0x06);  delay(2);   // entry mode: increment, no shift
+    lcdCmd(0x01);  delay(3);   // clear (slow: needs >1.5 ms)
+
+    for (uint8_t r = 0; r < LCD_ROWS; r++)
+        for (uint8_t c = 0; c < LCD_COLS; c++) {
+            lcd_want[r][c] = ' ';
+            lcd_shown[r][c] = ' ';   // matches the clear we just issued
+        }
+    lcd_present = true;
+    Serial.println(F("S,LCD,0x27"));
+}
+
+// Row start addresses in DDRAM for a 20x4 panel. Rows 2/3 continue rows 0/1,
+// which is why they are not evenly spaced.
+uint8_t lcdRowAddr(uint8_t row) {
+    static const uint8_t A[4] = {0x00, 0x40, 0x14, 0x54};
+    return A[row & 3];
+}
+
+// Copy text into the target buffer, space-padded. Does not touch the panel.
+void lcdSetRow(uint8_t row, const char *text) {
+    if (row >= LCD_ROWS) return;
+    for (uint8_t c = 0; c < LCD_COLS; c++)
+        lcd_want[row][c] = text[c] ? text[c] : ' ';
+    // stop copying past the terminator but keep padding
+    uint8_t i = 0;
+    while (text[i] && i < LCD_COLS) i++;
+    for (uint8_t c = i; c < LCD_COLS; c++) lcd_want[row][c] = ' ';
+}
+
+// Push at most ONE differing character. Called from loop(); the rate limit is
+// what keeps the I2C duty low enough not to disturb the software PWM.
+void lcdTick() {
+    if (!lcd_present) return;
+    unsigned long now = millis();
+    if ((long)(now - lcd_next_tick_ms) < 0) return;
+    lcd_next_tick_ms = now + LCD_TICK_MS;
+
+    // Find the next cell that differs, scanning round-robin so no row starves.
+    for (uint8_t n = 0; n < LCD_ROWS * LCD_COLS; n++) {
+        uint8_t idx = (lcd_scan + n) % (LCD_ROWS * LCD_COLS);
+        uint8_t r = idx / LCD_COLS, c = idx % LCD_COLS;
+        if (lcd_want[r][c] == lcd_shown[r][c]) continue;
+
+        // Only re-address when the cursor is not already in the right place;
+        // consecutive characters then cost one transaction each.
+        if (lcd_cursor_row != (int8_t)r || lcd_cursor_col != (int8_t)c) {
+            lcdCmd(0x80 | (lcdRowAddr(r) + c));
+            lcd_cursor_row = r;
+            lcd_cursor_col = c;
+        }
+        lcdData((uint8_t)lcd_want[r][c]);
+        lcd_shown[r][c] = lcd_want[r][c];
+        lcd_cursor_col++;
+        if (lcd_cursor_col >= LCD_COLS) { lcd_cursor_row = -1; }
+        lcd_scan = (idx + 1) % (LCD_ROWS * LCD_COLS);
+        return;
+    }
+}
+
+// Recompute the power display. Row 3 is left alone — it belongs to the ROS
+// `L,` command so the Pi can show mission state there.
+void lcdRefresh() {
+    if (!lcd_present) return;
+    unsigned long now = millis();
+    if ((long)(now - lcd_next_refresh_ms) < 0) return;
+    lcd_next_refresh_ms = now + LCD_REFRESH_MS;
+
+    char buf[LCD_COLS + 1];
+
+    lcdSetRow(0, "OfficeMate     v10.1");
+
+    if (ina_present) {
+        // 3S li-ion: 9.0 V empty, 12.6 V full — same window arduino_bridge uses.
+        int pct = (int)((ina_volts - 9.0f) / (12.6f - 9.0f) * 100.0f + 0.5f);
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        char v[8];
+        dtostrf(ina_volts, 5, 2, v);
+        snprintf(buf, sizeof(buf), "Bus %sV  Bat %3d%%", v, pct);
+        lcdSetRow(1, buf);
+
+        char a[8], w[8];
+        dtostrf(ina_amps, 5, 3, a);
+        dtostrf(ina_volts * ina_amps, 5, 1, w);
+        snprintf(buf, sizeof(buf), "Cur %sA %sW", a, w);
+        lcdSetRow(2, buf);
+    } else {
+        // Say so rather than showing a plausible-looking zero.
+        lcdSetRow(1, "Bus  --.--V  Bat --%");
+        lcdSetRow(2, "no INA219 detected");
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1000,7 +1282,9 @@ void handleLine(char *line) {
             break;
         case 'O':   // doors — not fitted
         case 'C':
-        case 'L':   // LCD — not fitted
+            break;
+        case 'L':   // status text from ROS -> bottom LCD row
+            if (line[1] == ',') lcdSetRow(3, line + 2);
             break;
         default:
             Serial.print(F("E,unknown cmd "));
@@ -1065,7 +1349,11 @@ void setup() {
     // returns false on any error, so a genuinely dead bus degrades to "no IMU"
     // rather than corrupt data.
     imuInit();
+    ina219Init();
+    lcdInit();
+    if (lcd_present) lcdSetRow(3, "Calibrating gyro...");
     gyroCalibrate();       // robot must be stationary at power-up
+    if (lcd_present) lcdSetRow(3, imu_addr ? "Ready" : "Ready (no IMU)");
 
     Serial.print(F("S,READY,"));
     Serial.println(F(FW_VERSION));
@@ -1080,6 +1368,12 @@ void loop() {
     imuTick();
     spwmTick();
     sonarTick();
+    spwmTick();
+    ina219Tick();
+    spwmTick();
+    lcdRefresh();
+    lcdTick();
+    spwmTick();
 
     // Watchdog: stop if the host goes quiet. Raw M/W/Y commands latch for
     // bench testing and are exempt — send S (or reset) to clear.
