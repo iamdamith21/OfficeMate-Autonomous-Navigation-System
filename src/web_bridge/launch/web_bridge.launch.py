@@ -38,10 +38,16 @@ def generate_launch_description():
                  # dead socket and the dashboard shows a stale "online".
                  'websocket_ping_interval': 10.0,
                  'websocket_ping_timeout': 30.0,
-                 # Sensor topics are best-effort on this robot; let rosbridge
-                 # match whatever the publisher offers rather than failing to
-                 # subscribe.
                  'default_call_service_timeout': 5.0,
+                 # Run service calls and action goals off the main thread.
+                 # DeliveryMission is a long-running action — with these left
+                 # False (the Humble default) dispatching one blocks
+                 # rosbridge's main loop, freezing the telemetry stream for
+                 # the whole mission and making the dashboard read "offline"
+                 # exactly while the robot is busy. Becomes the default in
+                 # Jazzy; rosbridge warns about it on every startup.
+                 'call_services_in_new_thread': True,
+                 'send_action_goals_in_new_thread': True,
              }]),
         Node(package='web_bridge', executable='api_adapter',
              name='api_adapter', output='screen'),
