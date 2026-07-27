@@ -26,11 +26,16 @@ three things that each cost real debugging time:
   kills your session instead of the stack.
 * `nohup ... &` over ssh does not reliably survive; the process group is
   SIGHUP'd on disconnect. `setsid` with fully detached stdio does.
-* The `ros2` CLI daemon caches whichever RMW it first saw. If it was ever
-  started with `rmw_fastrtps_cpp` while the stack runs CycloneDDS,
-  `ros2 node list` returns **nothing at all** while the stack is perfectly
-  healthy — a very convincing false alarm. `navctl.sh` stops the daemon so it
-  respawns with the right RMW.
+* **`ros2 node list` lies here.** It returns 0 nodes while the stack is
+  perfectly healthy — measured: 0 with the daemon, **31** with `--no-daemon`,
+  with the daemon already on the correct RMW. This setup pins CycloneDDS to
+  unicast `<Peers>` rather than multicast, which the CLI daemon's discovery
+  cache copes with badly. An RMW mismatch (daemon on FastRTPS, stack on
+  CycloneDDS) produces the identical symptom and did so earlier, which makes
+  this easy to misdiagnose as a dead stack.
+
+  **If you see "0 nodes", re-check with `ros2 node list --no-daemon` before
+  believing anything is wrong.** `navctl.sh status` already does.
 
 ## Before you let Nav2 drive
 

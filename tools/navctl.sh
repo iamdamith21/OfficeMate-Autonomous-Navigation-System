@@ -11,10 +11,17 @@
 #     process group gets SIGHUP when ssh exits. setsid with stdin/stdout fully
 #     detached is what actually survives.
 #
-# The ros2 CLI daemon caches an RMW at first use. If it was ever started with a
-# different RMW than the stack (fastrtps vs cyclonedds), `ros2 node list`
-# silently returns NOTHING while the stack is perfectly healthy. start/status
-# therefore always stop the daemon first so it respawns with our RMW.
+# The ros2 CLI daemon is not trustworthy on this setup. `ros2 node list`
+# returns 0 nodes while the stack is perfectly healthy and 31 nodes are
+# discoverable -- measured, with the daemon already running the correct RMW,
+# so this is the daemon's own discovery cache going stale rather than an RMW
+# mismatch (an RMW mismatch produces the same symptom, and did earlier, which
+# made this easy to misdiagnose). CycloneDDS here uses unicast <Peers> rather
+# than multicast, which the daemon copes with badly.
+#
+# Everything below therefore queries with --no-daemon. If you ever see "0
+# nodes" from a bare `ros2 node list`, re-check with --no-daemon before
+# believing the stack is down.
 
 # NOTE: no `set -u` — ROS 2 setup.bash references unbound vars and would abort.
 set -o pipefail
@@ -68,7 +75,7 @@ case "${1:-status}" in
     ;;
   status)
     echo "processes: $(pgrep -fc "$PATTERN" 2>/dev/null || echo 0)"
-    echo "nodes:     $(ros2 node list 2>/dev/null | wc -l)"
+    echo "nodes:     $(ros2 node list --no-daemon 2>/dev/null | wc -l)"
     echo "port 9090: $(ss -ltn 2>/dev/null | grep -c 9090)"
     ;;
   *)
