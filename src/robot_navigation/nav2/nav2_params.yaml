@@ -103,6 +103,10 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: false
+    # Was unset, so it silently defaulted to "odom" — a topic with zero
+    # publishers here (rf2o publishes /odom_rf2o, the EKF /odometry/filtered).
+    # The controller therefore saw the robot as permanently stationary.
+    odom_topic: /odometry/filtered
     controller_frequency: 5.0   # was 10.0 — reduced for Pi 4B CPU headroom
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
@@ -131,26 +135,40 @@ controller_server:
       forward_sampling_distance: 0.5   # check if path goes forward this far
       # 0.18 rad/s meant ~17 s to swing 180° before the robot even started
       # following the path. This is the number that made navigation feel slow.
-      rotate_to_heading_angular_vel: 0.45
+      rotate_to_heading_angular_vel: 0.55
       max_angular_accel: 1.5
       simulate_ahead_time: 1.0
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # Inner: RegulatedPurePursuitController
-      desired_linear_vel: 0.18         # m/s — target cruise speed
+      # Raised 0.18 -> 0.20 to sit at the measured ceiling (velocity_smoother
+      # max_velocity is 0.20 and 0.22 was erratic on the floor). This is the
+      # only speed headroom left on this robot and it is ~11%, so it will
+      # barely be perceptible: the slowness observed on 2026-07-31 was the
+      # robot STANDING STILL (cmd_vel contention, then the final-approach
+      # stall), not a low speed limit.
+      desired_linear_vel: 0.26         # m/s — target cruise speed (raised on request; above 0.20 rf2o tracking degrades)
       # RPP does its own in-place rotation when use_rotate_to_heading is on;
       # without these it would fall back to defaults and undo the shim's rate.
-      rotate_to_heading_angular_vel: 0.45
+      rotate_to_heading_angular_vel: 0.55
       max_angular_accel: 1.5
       lookahead_dist: 0.40             # m   — base lookahead
       min_lookahead_dist: 0.30
       max_lookahead_dist: 0.90
       lookahead_time: 1.5              # s   — time-scaled lookahead
       use_velocity_scaled_lookahead_dist: true
-      min_approach_linear_velocity: 0.05
+      # 0.05 m/s is below this drivetrain's stiction: 4WD skid-steer, no
+      # encoders, and floor calibration only ever verified clean tracking
+      # at 0.15 m/s. RPP scales toward this value over the last
+      # approach_velocity_scaling_dist metres, so the final approach asked
+      # for a speed the motors could not break loose at: the robot parked
+      # 0.24 m short (outside the 0.20 m xy tolerance) and controller_server
+      # replanned every 1.6 s forever while standing perfectly still, with
+      # nothing in the log naming a cause. Must stay above stiction.
+      min_approach_linear_velocity: 0.12
       approach_velocity_scaling_dist: 0.6
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.0
+      max_allowed_time_to_collision_up_to_carrot: 0.6
       use_regulated_linear_velocity_scaling: true   # slow near tight curves
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.25
@@ -159,7 +177,10 @@ controller_server:
       regulated_linear_scaling_min_speed: 0.15
       use_rotate_to_heading: true      # let RPP also handle small heading fixes
       rotate_to_heading_min_angle: 0.785
-      allow_reversing: false
+      # true so a robot wedged inside its own circumscribed radius has a
+      # legal move. It could previously neither rotate (footprint sweeps
+      # into the wall) nor reverse, which is a hard deadlock.
+      allow_reversing: true
       max_robot_pose_search_dist: 10.0
       transform_tolerance: 0.5
 
@@ -241,10 +262,23 @@ local_costmap:
       # so clear_on_max_reading frees the cone again once the way is clear.
       range_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        # Enabled 2026-07-27: the HC-SR04 is fitted and publishing ~12 Hz of
-        # valid ranges on /ultrasonic/range. Previously disabled because
-        # nothing published the topic.
-        enabled: true
+        # DISABLED 2026-07-31: the HC-SR04 publishes, but its readings are not
+        # trustworthy enough to mark a costmap. Measured with the robot
+        # STATIONARY facing a static scene, consecutive readings were
+        # 0.37 / 0.60 / 0.92 / 1.44 / 1.82 / 3.0 m -- that is noise, not a
+        # measurement. Combined with phi below (a 69 deg cone) every short
+        # reading painted a wide lethal arc straight ahead, so RPP reported
+        # "detected collision ahead!" continuously: the planner produced a good
+        # path, the robot wiggled in place, and every goal ABORTED with
+        # "Controller patience exceeded". Note this only started once the sonar
+        # began working -- while it returned -1 the layer cleared harmlessly.
+        #
+        # Re-enable ONLY after the sonar reads a stable distance while parked,
+        # and drop phi to about 0.26 rad first to match the HC-SR04's real
+        # ~15 deg beam; 1.2 rad over-marks enormously either way.
+        # The lidar obstacle_layer still handles obstacles, and the forward-stop
+        # clamp in arduino_bridge remains the low-obstacle safety net.
+        enabled: false
         topics: ["/ultrasonic/range"]
         phi: 1.2
         inflate_cone: 1.0
@@ -361,10 +395,10 @@ behavior_server:
       plugin: "nav2_behaviors/DriveOnHeading"
     wait:
       plugin: "nav2_behaviors/Wait"
-    simulate_ahead_time: 2.0
-    max_rotational_vel: 0.45   # matches the smoother's measured-honest ceiling
+    simulate_ahead_time: 1.2
+    max_rotational_vel: 0.55   # raised on request (past the 0.45 measured-honest point; firmware clamps ~0.50)
     min_rotational_vel: 0.08
-    rotational_acc_lim: 1.5
+    rotational_acc_lim: 2.2
 
 # ── Waypoint follower ─────────────────────────────────────────────────────────
 waypoint_follower:
@@ -398,14 +432,14 @@ velocity_smoother:
     # controllers assume commanded ~= achieved, so operating in the 1.19 region
     # buys nothing but heading overshoot. rotate_to_heading_angular_vel is
     # 0.45 anyway, so nothing is lost -- and it is still 2.25x the old 0.20.
-    max_velocity: [ 0.20, 0.0,  0.45]
-    min_velocity: [-0.20, 0.0, -0.45]
+    max_velocity: [ 0.28, 0.0,  0.60]
+    min_velocity: [-0.28, 0.0, -0.60]
     # Accel limits are what make the motion SMOOTH rather than stepped. The
     # controller runs at only 5 Hz on the Pi, so the smoother's 20 Hz ramp is
     # doing most of the work of turning 5 Hz staircase commands into
     # continuous motion. 1.5 rad/s² reaches full turn rate in ~0.33 s.
-    max_accel:    [ 0.4,  0.0,  1.5]
-    max_decel:    [-0.5,  0.0, -1.5]
+    max_accel:    [ 0.6,  0.0,  2.2]
+    max_decel:    [-0.7,  0.0, -2.2]
     odom_topic: /odometry/filtered
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]

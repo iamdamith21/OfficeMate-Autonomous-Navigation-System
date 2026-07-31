@@ -1,13 +1,22 @@
-# Goal — request a file delivery
+# Goal — request a file delivery.
+#
+# Locations are NAMES, not coordinates. They are resolved through the
+# location_manager (locations.json) at mission start, so the web app never
+# stores or sends map coordinates and a re-survey of the building does not
+# invalidate every saved mission.
 string mission_id
-string recipient_id                  # RFID tag expected at the dropoff
-geometry_msgs/PoseStamped pickup_pose
-geometry_msgs/PoseStamped dropoff_pose
+string sender_location       # e.g. "supervisor_desk"
+string recipient_location    # e.g. "office"
+string recipient_rfid        # expected tag UID at the recipient; empty = any
+string base_location         # defaults to the node's base_location param
 ---
 # Result
 bool success
 string message
+uint8 final_state
 ---
 # Feedback — current FSM state
 uint8 state
 string state_name
+string detail
+uint8 retry_count

@@ -41,7 +41,11 @@ from std_srvs.srv import Trigger
 
 CMD_RATE_HZ = 20.0
 RECONNECT_S = 3.0
-DOOR_ACK_TIMEOUT_S = 4.0
+# Must exceed DOOR_TRAVEL_MS in robot_firmware.ino (3400 ms), which is set
+# from the servo rate the doors were calibrated at (~38 deg/s). Driving
+# them faster to fit a shorter timeout strips the gears - raise this, not
+# the servo speed.
+DOOR_ACK_TIMEOUT_S = 8.0
 
 # Opening the port toggles DTR, which resets the Mega into its bootloader. The
 # bootloader only hands over to the sketch after the line goes quiet — and this

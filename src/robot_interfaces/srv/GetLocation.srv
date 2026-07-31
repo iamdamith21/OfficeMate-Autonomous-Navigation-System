@@ -1,0 +1,6 @@
+# Look up a saved location by name.
+string name
+---
+bool success
+string message
+geometry_msgs/PoseStamped pose

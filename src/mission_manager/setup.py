@@ -10,6 +10,7 @@ setup(
     packages=[
         package_name,
         package_name + '.delivery_manager',
+        package_name + '.location_manager',
         package_name + '.task_scheduler',
     ],
     data_files=[
@@ -26,6 +27,7 @@ setup(
     entry_points={
         'console_scripts': [
             'delivery_manager = mission_manager.delivery_manager.delivery_manager_node:main',
+            'location_manager = mission_manager.location_manager.location_manager_node:main',
         ],
     },
 )

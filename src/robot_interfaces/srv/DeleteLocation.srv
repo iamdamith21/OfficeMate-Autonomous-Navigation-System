@@ -1,0 +1,5 @@
+# Remove a saved location.
+string name
+---
+bool success
+string message

@@ -1,0 +1,6 @@
+# List every saved location for the current map.
+---
+bool success
+string message
+string[] names
+geometry_msgs/PoseStamped[] poses

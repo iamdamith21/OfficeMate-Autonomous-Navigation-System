@@ -38,3 +38,8 @@ compile_commands.json
 # ─── OS cruft ───
 .DS_Store
 Thumbs.db
+
+# ─── Local parameter backups (nav tuning experiments) ───
+*.yaml.bak
+*.yaml.prefast
+*.bak

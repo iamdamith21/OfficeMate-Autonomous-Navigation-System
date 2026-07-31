@@ -10,6 +10,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionState.msg"
   "srv/DoorControl.srv"
   "srv/VerifyRfid.srv"
+  "srv/SaveLocation.srv"
+  "srv/GetLocation.srv"
+  "srv/ListLocations.srv"
+  "srv/DeleteLocation.srv"
   "action/DeliveryMission.action"
   DEPENDENCIES std_msgs geometry_msgs
 )

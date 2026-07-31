@@ -1,0 +1,14 @@
+# Record the robot's CURRENT map pose under a human-readable name.
+#
+# Takes no coordinates by design: the operator drives the robot to the spot and
+# names it, so a saved location is by construction somewhere the robot has
+# physically stood and been localised. Accepting arbitrary coordinates would
+# happily record a point inside a wall.
+#
+# Saving an existing name OVERWRITES it — that is the intended way to nudge a
+# destination after re-mapping.
+string name
+---
+bool success
+string message
+geometry_msgs/PoseStamped pose   # what was actually stored

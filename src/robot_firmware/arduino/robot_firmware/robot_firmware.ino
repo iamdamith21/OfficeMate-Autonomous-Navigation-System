@@ -1,13 +1,69 @@
 /*
- * robot_firmware.ino v10 — OfficeMate sensor/actuator hub — MOTORS + IMU + SONAR
+ * robot_firmware.ino v11 — OfficeMate sensor/actuator hub — FULL PERIPHERAL SET
  *
  * Board : Arduino Mega 2560
- * Libs  : Wire (core only — no MPU/Servo/LCD libraries needed)
+ * Libs  : Wire, SPI, MFRC522, Servo
  *
- * Fitted: the two L298N motor drivers, an MPU6050-or-MPU9250 IMU, an INA219
- * power monitor and a 20x4 LCD (all on I2C), plus an HC-SR04 ultrasonic on
- * TRIG=D40 / ECHO=D41. Still NOT fitted: MFRC522, IR, door servos — so the
- * bridge's RFID / IR / door publishers stay silent and O/C are ignored.
+ * Fitted: the two L298N motor drivers, an MPU6500 IMU, an INA219 power monitor
+ * and a 20x4 LCD (all on I2C), an HC-SR04 ultrasonic on TRIG=D40 / ECHO=D41,
+ * an MFRC522 RFID reader on hardware SPI, an IR compartment sensor on D43, and
+ * two SG90 door servos on D44/D45. Every publisher and command the ROS-side
+ * hardware_bridge/arduino_bridge.py knows about is now backed by real hardware.
+ *
+ * ─── v11: RFID + IR + door servos ─────────────────────────────────────────
+ * These three complete the delivery mission FSM in mission_manager: it parks
+ * at the dropoff, waits for a tag on /rfid/tag (VERIFY_RFID), calls
+ * /doors/open (OPEN_DOOR), waits for /compartment/occupied to go false
+ * (WAIT_PACKAGE_REMOVAL), then /doors/close. The serial protocol was already
+ * specified and parsed by the bridge — R, D and A,DOORS lines simply had
+ * nothing producing them until now.
+ *
+ * The same no-blocking rule that shaped the sonar and LCD drivers applies, and
+ * the RFID reader is the worst offender on the board:
+ *
+ *   MFRC522 : the library busy-waits for the reader's internal timer on every
+ *             card poll, and PCD_Init leaves that timer at 25 ms. With no card
+ *             present that is a 25 ms stall — four whole software-PWM periods.
+ *             TWO defences, because one is not enough. (1) TReloadReg is cut to
+ *             ~2 ms right after PCD_Init (RFID_TIMER_TICKS), which is still an
+ *             order of magnitude more air time than a REQA/ATQA exchange needs.
+ *             (2) rfidTick returns immediately unless all four wheels are
+ *             stopped. Polling while driving buys nothing — the tag is scanned
+ *             with the robot parked at the dropoff — so the remaining ~2 ms
+ *             stall only ever lands when there is no PWM to disturb.
+ *
+ *   Servos  : the Servo library is interrupt-driven, so writeMicroseconds() is
+ *             a store, not a wait. Door motion is a time-interpolated state
+ *             machine (see doorTick) rather than the usual step-and-delay loop.
+ *
+ * SERVO SAFETY RULE, PAID FOR ONCE ALREADY — never command a servo position
+ * that was not asked for, and never step one. A first cut of v11 parked the
+ * doors in setup() with a bare doorApply(). Since every flash and every reset
+ * re-runs setup(), an arm left open was driven the full sweep into the door
+ * frame at ~600 deg/s and stalled there; that broke the left servo, and the
+ * stalled SG90's ~700 mA pulled the 5 V rail down until the board would no
+ * longer boot. Hence: setup() does not touch the servos, they are attached
+ * only for the duration of a commanded move (doorAttach), the first pulse
+ * after attaching re-states the CURRENT position so nothing jumps, and they
+ * are released once the endpoint settles.
+ *
+ *   IR      : one digitalRead per 20 ms poll. Free.
+ *
+ * DOOR MOTION — why it is interpolated on time rather than stepped.
+ * The bench calibration sketch moved 2 deg every 60 ms. An SG90 slews at about
+ * 600 deg/s, so each step was a ~3 ms jab followed by a 57 ms dead stop: 17
+ * discrete kicks a second, which through a long printed arm reads as a violent
+ * judder. doorTick instead refreshes once per 20 ms servo frame (finer is
+ * wasted — the servo latches one pulse per frame), commands in microseconds so
+ * the steps are sub-degree, and eases the travel with a smoothstep so the arm
+ * cannot bounce against the door frame at either end.
+ *
+ * DOOR ANGLES are the bench-calibrated pair and are NOT mirrored — the two
+ * arms have different geometry on the frame, so each side keeps its own
+ * independent closed/open pair. Angle -> pulse uses the Servo library's own
+ * 544-2400 us mapping so these numbers mean exactly what they meant on the
+ * bench; SERVO_US_MIN/MAX then clamp the result as a backstop against a
+ * mis-edit driving a servo into its internal end stop and grinding.
  *
  * ─── v10.1: INA219 + LCD ──────────────────────────────────────────────────
  * The LCD is driven by a purpose-written incremental driver rather than
@@ -130,17 +186,24 @@
  *    G                         re-zero the gyro bias (robot must be still)
  *    Z                         sensor diagnostics: I2C scan + one sonar ping
  *    L,<text>                  text for the bottom LCD row (mission status)
- *    O / C                     accepted and ignored (no door servos fitted)
+ *    O                         open the compartment doors
+ *    C                         close the compartment doors
+ *    H,<0|1>                   doors are physically at closed(0)/open(1) —
+ *                              resync belief to reality, move nothing
  *  Board → Pi:
  *    S,READY,<ver>             boot complete
  *    S,PONG                    ping reply
  *    S,IMU,<name>,0x<addr>     IMU detected at boot
  *    S,INA219,0x40             power monitor detected
  *    S,LCD,0x27                display detected
+ *    S,MFRC522,0x<ver>         RFID reader detected
  *    B,<volts>,<amps>          battery/bus power, 1 Hz
  *    S,GYROCAL,<gx>,<gy>,<gz>  gyro bias in rad/s after calibration
  *    I,ax,ay,az,gx,gy,gz       IMU 50 Hz — m/s^2 and rad/s, base_link axes
  *    U,<metres>                ultrasonic ~15 Hz; -1 means no echo
+ *    R,<UID hex>               RFID tag scanned (uppercase, no separators)
+ *    D,<0|1>                   compartment IR: 1 = something in there
+ *    A,DOORS,<MOVING|OPEN|CLOSED>   door state; MOVING then the settled state
  *    E,<msg>                   error/diagnostic
  *
  * ─── Tuning ────────────────────────────────────────────────────────────────
@@ -150,9 +213,40 @@
  *  INVERT_* : flip if a side runs backwards.
  */
 
-#define FW_VERSION "v10.1-ina-lcd"
+#define FW_VERSION "v11-rfid-doors"
 
 #include <Wire.h>
+#include <SPI.h>
+
+// Override the MFRC522 library's 4 MHz default. MUST come before MFRC522.h,
+// which defines it inside an #ifndef.
+//
+// The reader is a 3.3 V part driven by 5 V Mega outputs down dupont wire, with
+// no level shifter. VersionReg is a constant, so reading it repeatedly at a
+// range of clocks measures the link directly — that is what `Z`'s diagRfidSpi
+// does. Measured 2026-07-31, 20 reads at each clock:
+//
+//     4000 kHz -> 0x02, 18/19 differing
+//     2000 kHz -> 0x04, 16/19
+//     1000 kHz -> 0x04,  7/19
+//      500 kHz -> 0x82, 10/19
+//      250 kHz -> 0x82,  0/19      <- chosen
+//      125 kHz -> 0x82,  1/19
+//
+// Monotonically better as the clock slows, which is the signature of signal
+// integrity rather than a dead part. 250 kHz is the fastest clock that read
+// clean. The cost is irrelevant here: a card poll is a few hundred bytes and
+// only ever runs with the robot parked.
+//
+// THIS IS A MITIGATION, NOT A FIX. Note the value it settles on, 0x82, is not
+// a documented MFRC522 version (0x91/0x92 genuine, 0x12/0x88 clone), and
+// TReloadReg still does not read back what was written to it — so the link is
+// quieter but not proven correct. Fit the level shifter (or 1k/2k dividers) on
+// SCK/MOSI/SS/RST that the pin map calls for before trusting this reader.
+#define MFRC522_SPICLOCK (250000u)
+#include <MFRC522.h>
+#include <Servo.h>
+#include <EEPROM.h>
 
 // ─── Motor driver pins (2× L298N, one per SIDE) ────────────────────────────
 // All twelve verified PASS by pin_health.ino before being chosen.
@@ -172,6 +266,41 @@
 // ─── Ultrasonic pins (HC-SR04) ─────────────────────────────────────────────
 #define SONAR_TRIG 40
 #define SONAR_ECHO 41
+
+// ─── RFID pins (MFRC522, hardware SPI) ─────────────────────────────────────
+// MISO=D50 MOSI=D51 SCK=D52 are the Mega's fixed hardware SPI pins and are not
+// selectable. The module is a 3.3 V part: SCK/MOSI/SS/RST must go through a
+// level shifter or divider, and it must be powered from 3.3 V, not 5 V. MISO
+// needs nothing — 3.3 V already reads as HIGH on a 5 V input.
+#define RFID_SS   53
+#define RFID_RST  49
+
+// ─── IR compartment sensor ─────────────────────────────────────────────────
+#define IR_PIN    43
+
+// ─── Door servo pins (2× SG90) ─────────────────────────────────────────────
+// The Servo library claims Timer5 no matter which pins are attached, and
+// Timer5 is exactly what drives hardware PWM on D44/D45/D46 — so putting the
+// servos here costs nothing that was not already lost. The four motor enables
+// (D7/D8/D11/D12) are plain DC digitalWrite outputs, not analogWrite, so the
+// drive train is untouched by this.
+// As wired and confirmed by the user 2026-07-31: LEFT door on D44, RIGHT on
+// D45. (Briefly swapped earlier on a guess from the open/close asymmetry —
+// that guess was wrong, and with the left servo dead it would have driven the
+// surviving RIGHT servo to the left door's 175 close angle, 25 degrees past
+// its stop. Do not re-swap these without physical confirmation.)
+#define SERVO_L   44
+#define SERVO_R   45
+
+// The LEFT door's servo is mechanically destroyed (stripped gears) and not yet
+// replaced. A dead servo still draws stall current when driven, and that is
+// what has repeatedly collapsed the 5 V rail and stopped the Mega booting
+// mid-test. So it is never attached and never driven: doorTick moves only the
+// right arm, while the door STATE machine and its A,DOORS acks behave exactly
+// as normal, which keeps the delivery mission FSM fully testable.
+//
+// Set back to 1 once the servo is replaced.
+#define DOOR_LEFT_PRESENT  0
 
 // ─── Robot parameters (match URDF properties.xacro) ───────────────────────
 #define WHEEL_RADIUS    0.065f
@@ -370,6 +499,101 @@
 #define SONAR_ECHO_TIMEOUT_US 25000UL
 #define SONAR_RISE_TIMEOUT_US 30000UL   // sensor never answered at all
 
+// ─── RFID (MFRC522) ────────────────────────────────────────────────────────
+// Poll rate. Nothing needs to be fast here: a human presenting a badge holds it
+// against the reader for the best part of a second, and every poll is a stall
+// (see the header). 10 Hz is far more than enough.
+#define RFID_PERIOD_MS      200
+// The reader's internal card-detect timeout, in units of its 25 us timer tick.
+// 1000 ticks = 25 ms. This is deliberately the stock value: it is the setting
+// that was proven on the bench to actually detect a tag, and shrinking it to
+// save loop time is exactly the kind of "optimisation" that would silently
+// stop cards being seen. The stall it causes is affordable because rfidTick
+// refuses to run while the wheels turn or a door moves, so it only ever lands
+// with the robot parked and idle.
+#define RFID_TIMER_TICKS    1000
+// Suppress repeats of the same UID. Without this a tag left sitting on the
+// reader republishes at RFID_PERIOD_MS forever and floods the serial link.
+#define RFID_REPEAT_MS      2000UL
+// If the reader is absent at boot, retry this often rather than staying dead
+// for the whole session — a momentary bad contact at power-up must not
+// silently disable the one sensor the delivery mission cannot proceed without.
+#define RFID_REPROBE_MS     5000UL
+
+// ─── IR compartment sensor ─────────────────────────────────────────────────
+#define IR_POLL_MS          20
+#define IR_DEBOUNCE_MS      50UL
+// Republish even when unchanged, so a subscriber that starts late (the mission
+// FSM connects long after boot) learns the current state without waiting for
+// someone to physically disturb the compartment.
+#define IR_REFRESH_MS       2000UL
+// FC-51-style IR obstacle modules pull their output LOW when something is in
+// front of them. Flip this if yours is the active-high sort. The pin is held
+// INPUT_PULLUP so an unplugged sensor reads "empty" rather than jamming the
+// mission in WAIT_PACKAGE_REMOVAL forever.
+#define IR_OCCUPIED_LEVEL   LOW
+
+// ─── Door servos ───────────────────────────────────────────────────────────
+// Bench-calibrated 2026-07-30 with the arms fitted to the real doors. The two
+// sides are NOT mirror images — each keeps its own pair. Do not "tidy" these
+// into a shared sweep; the arms differ on the frame.
+// EXACTLY the constants declared in ~/Arduino/sketch_jul30a_working/. These
+// cost real time on the bench to find; do not "improve" them.
+//
+// An earlier version used 157 here, inferred from that sketch's sweep loop
+// writing RIGHT_CLOSE + i for i up to 72. That was wrong: it drove the right
+// door 7 degrees past its declared endpoint, into the frame.
+#define LEFT_CLOSE_DEG    175
+#define LEFT_OPEN_DEG      90
+#define RIGHT_CLOSE_DEG    85
+#define RIGHT_OPEN_DEG    150
+// One servo frame. The SG90 latches exactly one pulse per 20 ms frame, so
+// updating faster than this is wasted work.
+#define DOOR_FRAME_MS      20UL
+// Full-sweep travel time, set from the ANGULAR RATE the bench sketch proved,
+// not from what feels responsive.
+//
+// That sketch steps 2 degrees per 60 ms = ~38 deg/s, constant. An earlier
+// version of this firmware used 1200 ms for the left door's 85 degree sweep;
+// because smoothstep peaks at 1.5x its average rate, that is ~106 deg/s at
+// mid-travel — nearly 3x the proven speed — and it stripped the servo gears.
+//
+// Sizing rule: peak = 1.5 * sweep / travel, and peak must stay <= ~38 deg/s.
+// For the 85 degree left sweep that needs travel >= 3.4 s. Any change to the
+// angles above must be re-checked against this.
+//
+// This EXCEEDS the bridge's original 4 s door-ack timeout, so
+// DOOR_ACK_TIMEOUT_S in arduino_bridge.py was raised to 8 s to match. The two
+// must be changed together or every door service call fails on a timeout
+// while the door is still moving perfectly well.
+#define DOOR_TRAVEL_MS    3400UL
+// A reversal mid-travel scales its duration by how far it actually has to go,
+// so a small correction is quick — but never so quick that it becomes a jab.
+#define DOOR_MIN_TRAVEL_MS 150UL
+// How long to keep holding the endpoint before releasing the servos. Long
+// enough for the arm to settle, short enough that nothing sits stalled.
+#define DOOR_HOLD_MS       400UL
+// Backstop only. The angle->pulse conversion uses the Servo library's own
+// 544-2400 us mapping so the calibrated angles above keep their bench meaning;
+// these bounds exist to stop a future mis-edit parking a servo against its
+// internal end stop, where it grinds and stalls at ~700 mA.
+#define SERVO_US_MIN      600
+#define SERVO_US_MAX     2350
+
+// EEPROM slots holding where the doors were last left.
+//
+// Without this the firmware assumes CLOSED at every boot. If the doors were
+// actually left OPEN, the first attach() + write() of a commanded move drives
+// the arms the entire sweep at the servo's full ~600 deg/s to reach the
+// position the firmware only THINKS they are at — a slam identical to the one
+// that broke a servo from setup(), just relocated into doorCommand(). Every
+// flash resets the board, so this fires constantly during development.
+//
+// A door move is a rare event, so the ~100k EEPROM write endurance is ample.
+#define EE_DOOR_MAGIC_ADDR  0
+#define EE_DOOR_STATE_ADDR  1
+#define EE_DOOR_MAGIC       0xD7
+
 // ─── State ─────────────────────────────────────────────────────────────────
 unsigned long last_cmd_ms = 0;
 char          line_buf[LINE_BUF_LEN];
@@ -421,6 +645,51 @@ SonarState    sonar_state = SONAR_IDLE;
 unsigned long sonar_next_ms = 0;
 unsigned long sonar_phase_us = 0;   // when the current phase started
 unsigned long sonar_echo_start_us = 0;
+
+// RFID state
+MFRC522       rfid(RFID_SS, RFID_RST);
+bool          rfid_present = false;
+bool          rfid_antenna = false;      // TxControlReg bits 0-1 confirmed set
+unsigned long rfid_antenna_drops = 0;    // times the chip lost its config
+uint8_t       rfid_version = 0;
+unsigned long rfid_next_ms = 0;
+char          rfid_last_uid[21] = "";      // up to a 10-byte UID in hex
+unsigned long rfid_last_ms = 0;
+
+// IR compartment state. ir_state is what has been reported; ir_candidate is
+// what the pin currently reads, which only becomes ir_state once it has held
+// still for IR_DEBOUNCE_MS.
+bool          ir_state = false;
+bool          ir_candidate = false;
+unsigned long ir_stable_ms = 0;
+unsigned long ir_next_ms = 0;
+unsigned long ir_refresh_ms = 0;
+
+// Door state. door_pos_* track the CURRENT interpolated angle so a command
+// arriving mid-travel starts from where the arms actually are, not from the
+// endpoint they were heading for.
+enum DoorState { DOOR_CLOSED, DOOR_OPENING, DOOR_OPEN, DOOR_CLOSING };
+Servo         servo_l, servo_r;
+DoorState     door_state = DOOR_CLOSED;
+float         door_pos_l = LEFT_CLOSE_DEG;
+float         door_pos_r = RIGHT_CLOSE_DEG;
+float         door_from_l = LEFT_CLOSE_DEG, door_to_l = LEFT_CLOSE_DEG;
+float         door_from_r = RIGHT_CLOSE_DEG, door_to_r = RIGHT_CLOSE_DEG;
+unsigned long door_start_ms = 0;
+unsigned long door_travel_ms = DOOR_TRAVEL_MS;
+unsigned long door_next_frame_ms = 0;
+unsigned long door_release_ms = 0;   // 0 = nothing pending
+
+// Loop-cost instrumentation. The whole risk of v11 is that a new blocking
+// peripheral quietly steals time from the IMU and sonar — and it presents as
+// BOTH rates falling by the same fraction, which is easy to misread as a
+// measurement-window artifact. These make the cost visible in the `Z` diag
+// instead of inferable, so the next person does not have to guess.
+unsigned long loop_count = 0;
+unsigned long loop_rate_ms = 0;
+unsigned long loop_rate_hz = 0;      // completed loop() passes per second
+unsigned long rfid_poll_us = 0;      // duration of the last card poll
+unsigned long rfid_poll_max_us = 0;  // worst seen since boot
 
 // ───────────────────────────────────────────────────────────────────────────
 // Software PWM — call as often as possible from loop()
@@ -1004,6 +1273,371 @@ void sonarTick() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// RFID — MFRC522 on hardware SPI
+//
+// Every poll of this reader is a blocking wait on its internal timer, so both
+// defences described in the header are load-bearing: the timer is cut to ~2 ms
+// in rfidProbe, and rfidTick refuses to run at all while any wheel is turning.
+// ───────────────────────────────────────────────────────────────────────────
+bool motorsBusy() {
+    for (uint8_t i = 0; i < 4; i++) {
+        if (CH[i].dir != 0) return true;
+    }
+    return false;
+}
+
+// Write the working configuration WITHOUT a soft reset.
+//
+// This exists because the chip loses its configuration constantly (see
+// rfidTick), and the obvious repair — calling PCD_Init() again — blocks for
+// ~89 ms. At a 200 ms poll that is nearly half of all wall time, which
+// starved the 20 ms door frames badly enough that /doors/close missed the
+// bridge's 4 s ack window. These are ~10 register writes, about 1 ms at
+// 250 kHz, and restore everything a card poll depends on.
+void rfidConfigure() {
+    // 25 ms card-detect timeout. Deliberately the same value that was proven
+    // to detect a card on the bench — do not shrink it to save loop time
+    // without re-testing an actual tag.
+    rfid.PCD_WriteRegister(MFRC522::TModeReg, 0x80);
+    rfid.PCD_WriteRegister(MFRC522::TPrescalerReg, 0xA9);
+    rfid.PCD_WriteRegister(MFRC522::TReloadRegH, (uint8_t)(RFID_TIMER_TICKS >> 8));
+    rfid.PCD_WriteRegister(MFRC522::TReloadRegL, (uint8_t)(RFID_TIMER_TICKS & 0xFF));
+    rfid.PCD_WriteRegister(MFRC522::TxASKReg, 0x40);
+    rfid.PCD_WriteRegister(MFRC522::ModeReg, 0x3D);
+
+    // Switch the antenna on and CONFIRM it, retrying immediately on failure.
+    //
+    // `PCD_AntennaOn()` sets bits 0-1 of TxControlReg and checks nothing. If
+    // that write does not stick, the reader still answers every register read,
+    // reports no error anywhere, and simply never sees a card — the most
+    // misleading failure on this board, because everything looks healthy.
+    rfid_antenna = false;
+    for (uint8_t t = 0; t < 4 && !rfid_antenna; t++) {
+        uint8_t v = rfid.PCD_ReadRegister(MFRC522::TxControlReg);
+        rfid.PCD_WriteRegister(MFRC522::TxControlReg, v | 0x03);
+        rfid_antenna =
+            (rfid.PCD_ReadRegister(MFRC522::TxControlReg) & 0x03) == 0x03;
+    }
+}
+
+// Probe for the reader and, if it answers, put it into a state where a poll is
+// cheap. Also used as the periodic re-probe when the reader is missing.
+void rfidProbe(bool announce) {
+    rfid.PCD_Init();
+    rfid_version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+
+    // 0x00 and 0xFF are the two "nothing is driving MISO" readings — an absent
+    // module, a dead one, or SPI wired wrong. Genuine parts report 0x91/0x92;
+    // the common clones report 0x12 or 0x88 and work fine, so anything else is
+    // accepted rather than rejected on version alone.
+    if (rfid_version == 0x00 || rfid_version == 0xFF) {
+        rfid_present = false;
+        if (announce) Serial.println(F("E,no MFRC522"));
+        return;
+    }
+
+    // MUST come after PCD_Init, which would otherwise overwrite it.
+    rfidConfigure();
+    if (!rfid_antenna && announce) Serial.println(F("E,rfid antenna OFF"));
+
+    rfid_present = true;
+    if (announce) {
+        Serial.print(F("S,MFRC522,0x"));
+        if (rfid_version < 0x10) Serial.print('0');
+        Serial.println(rfid_version, HEX);
+    }
+}
+
+void rfidTick() {
+    // Never poll while driving: it would stall the software PWM, and a tag is
+    // only ever presented with the robot parked at the dropoff anyway.
+    if (motorsBusy()) return;
+
+    // Nor while a door is moving. A card poll blocks for up to the reader's
+    // 25 ms timeout, which is more than one 20 ms servo frame, and the doors
+    // must reach their endpoint inside the bridge's 4 s ack window. Nothing is
+    // lost: the tag has already been read by the time a door is asked to move.
+    if (door_state == DOOR_OPENING || door_state == DOOR_CLOSING) return;
+
+    unsigned long now = millis();
+    if ((long)(now - rfid_next_ms) < 0) return;
+
+    if (!rfid_present) {
+        rfid_next_ms = now + RFID_REPROBE_MS;
+        rfidProbe(false);
+        if (rfid_present) {
+            Serial.print(F("S,MFRC522,0x"));
+            if (rfid_version < 0x10) Serial.print('0');
+            Serial.println(rfid_version, HEX);
+        }
+        return;
+    }
+
+    rfid_next_ms = now + RFID_PERIOD_MS;
+
+    // Self-heal. Measured on this rig 2026-07-31: the reader loses its ENTIRE
+    // configuration roughly every other poll — a scratch marker written to
+    // TReloadRegL disappears at exactly the same moments the antenna bit does,
+    // which is a whole-chip reset rather than one lost write. Root cause is
+    // its 3.3 V supply sagging when the antenna driver draws current (fit a
+    // 100 uF + 100 nF across the module's 3.3 V/GND, or give it a real
+    // regulator).
+    //
+    // Repair with rfidConfigure(), NOT rfidProbe(): the latter calls
+    // PCD_Init(), which blocks ~89 ms, and at this poll rate that consumed
+    // most of the loop and starved doorTick's 20 ms frames until
+    // /doors/close missed the bridge's 4 s ack window.
+    if ((rfid.PCD_ReadRegister(MFRC522::TxControlReg) & 0x03) != 0x03) {
+        rfid_antenna_drops++;
+        rfidConfigure();
+        if (!rfid_antenna) return;      // still down; try again next poll
+    }
+
+    unsigned long t0 = micros();
+    bool present = rfid.PICC_IsNewCardPresent();
+    rfid_poll_us = micros() - t0;
+    if (rfid_poll_us > rfid_poll_max_us) rfid_poll_max_us = rfid_poll_us;
+
+    if (!present) return;
+    if (!rfid.PICC_ReadCardSerial()) return;
+
+    static const char HEXC[] = "0123456789ABCDEF";
+    char uid[21];
+    uint8_t n = rfid.uid.size;
+    if (n > 10) n = 10;                 // cannot overflow uid[] whatever it says
+    for (uint8_t i = 0; i < n; i++) {
+        uid[i * 2]     = HEXC[rfid.uid.uidByte[i] >> 4];
+        uid[i * 2 + 1] = HEXC[rfid.uid.uidByte[i] & 0x0F];
+    }
+    uid[n * 2] = '\0';
+
+    // Stop talking to this card either way — leaving it selected blocks the
+    // next detection, so a second scan of the same tag would never be seen.
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+
+    bool same = (strcmp(uid, rfid_last_uid) == 0);
+    if (same && (now - rfid_last_ms) < RFID_REPEAT_MS) return;
+
+    strcpy(rfid_last_uid, uid);
+    rfid_last_ms = now;
+
+    Serial.print(F("R,"));
+    Serial.println(uid);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// IR compartment sensor — is there still a package in there?
+// ───────────────────────────────────────────────────────────────────────────
+void irReport() {
+    if (Serial.availableForWrite() < 8) return;
+    Serial.print(F("D,"));
+    Serial.println(ir_state ? 1 : 0);
+    ir_refresh_ms = millis() + IR_REFRESH_MS;
+}
+
+void irTick() {
+    unsigned long now = millis();
+    if ((long)(now - ir_next_ms) < 0) return;
+    ir_next_ms = now + IR_POLL_MS;
+
+    bool raw = (digitalRead(IR_PIN) == IR_OCCUPIED_LEVEL);
+    if (raw != ir_candidate) {
+        // Reading changed — restart the settling clock rather than believing it.
+        ir_candidate = raw;
+        ir_stable_ms = now;
+    } else if (raw != ir_state && (now - ir_stable_ms) >= IR_DEBOUNCE_MS) {
+        ir_state = raw;
+        irReport();
+        return;
+    }
+
+    if ((long)(now - ir_refresh_ms) >= 0) irReport();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Door servos — non-blocking, time-interpolated, smoothstep-eased
+// ───────────────────────────────────────────────────────────────────────────
+// Angle -> pulse using the Servo library's own 0-180 => 544-2400 us mapping,
+// so the bench-calibrated angles keep exactly the meaning they had there, then
+// clamped as a backstop (see SERVO_US_MIN/MAX).
+int doorAngleToUs(float deg) {
+    if (deg < 0.0f)   deg = 0.0f;
+    if (deg > 180.0f) deg = 180.0f;
+    int us = (int)(544.0f + deg * (2400.0f - 544.0f) / 180.0f + 0.5f);
+    if (us < SERVO_US_MIN) us = SERVO_US_MIN;
+    if (us > SERVO_US_MAX) us = SERVO_US_MAX;
+    return us;
+}
+
+// Remember where the doors ended up, so the next boot does not have to guess.
+// Only called when a move settles, and EEPROM.update skips the write when the
+// byte is unchanged.
+void doorSave() {
+    EEPROM.update(EE_DOOR_MAGIC_ADDR, EE_DOOR_MAGIC);
+    EEPROM.update(EE_DOOR_STATE_ADDR, door_state == DOOR_OPEN ? 1 : 0);
+}
+
+// Restore the last known door position at boot. A missing or wrong magic byte
+// means a blank/foreign EEPROM, in which case CLOSED is the safe assumption:
+// the doors rest closed, and being wrong that way commands a move AWAY from
+// the stop rather than into it.
+void doorRestore() {
+    if (EEPROM.read(EE_DOOR_MAGIC_ADDR) != EE_DOOR_MAGIC) return;
+    if (EEPROM.read(EE_DOOR_STATE_ADDR) == 1) {
+        door_state = DOOR_OPEN;
+        door_pos_l = LEFT_OPEN_DEG;
+        door_pos_r = RIGHT_OPEN_DEG;
+    }
+}
+
+void doorReport() {
+    const __FlashStringHelper *s;
+    switch (door_state) {
+        case DOOR_OPEN:   s = F("OPEN");   break;
+        case DOOR_CLOSED: s = F("CLOSED"); break;
+        default:          s = F("MOVING"); break;
+    }
+    Serial.print(F("A,DOORS,"));
+    Serial.println(s);
+}
+
+// Servos are attached only while a door is actually moving.
+//
+// Two reasons, both learned the hard way. (1) An attached servo starts pulsing
+// the instant it is attached, so attaching at boot commands a position before
+// anyone asked for one — that is what crashed the left arm into the frame.
+// (2) A held SG90 fights any mechanical mismatch forever, buzzing and drawing
+// current; released, it is limp and draws nothing. These doors are light and
+// stay put on gearbox friction alone.
+// ORDER IS LOAD-BEARING: set the pulse width BEFORE attaching.
+//
+// Servo::attach() begins pulsing at DEFAULT_PULSE_WIDTH — 1500 us, i.e. 90
+// degrees — and does NOT touch the stored pulse value. So attaching first and
+// writing the real position afterwards commands 90 degrees for at least one
+// frame, and the arm lunges there at the servo's full ~600 deg/s before the
+// eased motion ever starts.
+//
+// That is what made OPEN work and CLOSE kill the board. Opening, the right
+// arm sits at 85 deg, so the lunge to 90 is 5 degrees and harmless. Closing,
+// it sits at 150, so attach() drove it 60 degrees instantly while the left arm
+// was being driven too — and the combined stall current browned out the Mega
+// before the MOVING ack could even be printed.
+//
+// Writing first is safe because Servo assigns servoIndex in its CONSTRUCTOR,
+// not in attach(), so writeMicroseconds() is honoured on a detached servo and
+// attach() then picks up that value instead of the 1500 us default.
+void doorAttach() {
+#if DOOR_LEFT_PRESENT
+    servo_l.writeMicroseconds(doorAngleToUs(door_pos_l));
+    if (!servo_l.attached()) servo_l.attach(SERVO_L);
+#endif
+    servo_r.writeMicroseconds(doorAngleToUs(door_pos_r));
+    if (!servo_r.attached()) servo_r.attach(SERVO_R);
+}
+
+void doorDetach() {
+    if (servo_l.attached()) servo_l.detach();
+    if (servo_r.attached()) servo_r.detach();
+}
+
+void doorApply() {
+    // Never pulse a servo that is not meant to be moving.
+#if DOOR_LEFT_PRESENT
+    if (!servo_l.attached()) return;
+    servo_l.writeMicroseconds(doorAngleToUs(door_pos_l));
+#endif
+    if (!servo_r.attached()) return;
+    servo_r.writeMicroseconds(doorAngleToUs(door_pos_r));
+}
+
+// Declare where the doors physically are, WITHOUT moving them.
+//
+// The recovery path for the one case doorRestore() cannot cover: the arms have
+// been moved by hand, or the EEPROM does not yet know about them, so the
+// firmware's belief and reality disagree. Commanding a move in that state
+// slams the arms the full sweep. This resyncs belief to reality instead.
+// Servos are left detached, so nothing moves as a result of this.
+void doorAssume(bool open) {
+    door_state = open ? DOOR_OPEN : DOOR_CLOSED;
+    door_pos_l = open ? LEFT_OPEN_DEG  : LEFT_CLOSE_DEG;
+    door_pos_r = open ? RIGHT_OPEN_DEG : RIGHT_CLOSE_DEG;
+    doorSave();
+    doorReport();
+}
+
+void doorCommand(bool open) {
+    DoorState settled = open ? DOOR_OPEN : DOOR_CLOSED;
+
+    // Already there — re-ack so the bridge's service call completes instead of
+    // sitting out its 4 s timeout waiting for a transition that cannot happen.
+    if (door_state == settled) {
+        doorReport();
+        return;
+    }
+
+    door_from_l = door_pos_l;
+    door_from_r = door_pos_r;
+    door_to_l = open ? LEFT_OPEN_DEG  : LEFT_CLOSE_DEG;
+    door_to_r = open ? RIGHT_OPEN_DEG : RIGHT_CLOSE_DEG;
+
+    // Scale the travel time by how far there actually is to go, so reversing
+    // mid-sweep does not spend the full duration crawling a few degrees.
+    float span_l = fabs(door_to_l - door_from_l) / fabs((float)(LEFT_OPEN_DEG  - LEFT_CLOSE_DEG));
+    float span_r = fabs(door_to_r - door_from_r) / fabs((float)(RIGHT_OPEN_DEG - RIGHT_CLOSE_DEG));
+    float frac = span_l > span_r ? span_l : span_r;
+    if (frac > 1.0f) frac = 1.0f;
+    door_travel_ms = (unsigned long)(DOOR_TRAVEL_MS * frac);
+    if (door_travel_ms < DOOR_MIN_TRAVEL_MS) door_travel_ms = DOOR_MIN_TRAVEL_MS;
+
+    door_start_ms = millis();
+    door_next_frame_ms = door_start_ms;
+    door_state = open ? DOOR_OPENING : DOOR_CLOSING;
+
+    // Attach and immediately command the position the arms are ALREADY at, so
+    // the servo's first pulse asks for no movement. Attaching without this
+    // makes the servo snap to wherever its last commanded position was.
+    doorAttach();
+    doorApply();
+
+    doorReport();          // MOVING
+}
+
+void doorTick() {
+    if (door_state != DOOR_OPENING && door_state != DOOR_CLOSING) return;
+
+    unsigned long now = millis();
+    if ((long)(now - door_next_frame_ms) < 0) return;
+    door_next_frame_ms = now + DOOR_FRAME_MS;
+
+    float p = (float)(now - door_start_ms) / (float)door_travel_ms;
+    if (p > 1.0f) p = 1.0f;
+    // Smoothstep: zero velocity at both ends, so a long printed arm cannot
+    // bounce against the door frame when it arrives.
+    float e = p * p * (3.0f - 2.0f * p);
+
+    door_pos_l = door_from_l + (door_to_l - door_from_l) * e;
+    door_pos_r = door_from_r + (door_to_r - door_from_r) * e;
+    doorApply();
+
+    if (p >= 1.0f) {
+        door_state = (door_state == DOOR_OPENING) ? DOOR_OPEN : DOOR_CLOSED;
+        // Hold briefly so the arm settles at the endpoint before going limp,
+        // then release (see doorAttach for why we do not hold indefinitely).
+        door_release_ms = now + DOOR_HOLD_MS;
+        doorSave();
+        doorReport();
+    }
+}
+
+void doorReleaseTick() {
+    if (door_release_ms == 0) return;
+    if ((long)(millis() - door_release_ms) < 0) return;
+    door_release_ms = 0;
+    doorDetach();
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // Sensor diagnostics — `Z` command
 //
 // Answers the two questions you actually have when a sensor is silent:
@@ -1125,10 +1759,113 @@ void diagSonar() {
     digitalWrite(SONAR_TRIG, LOW);
 }
 
+// RFID and IR, for the same reason as the I2C scan: tell a missing/miswired
+// part from a merely idle one. A VersionReg of 0x00 or 0xFF means nothing is
+// driving MISO — check power (3.3 V, not 5 V), SS/RST, and the level shifter.
+// Read VersionReg at a range of SPI clocks, bypassing the library entirely.
+//
+// VersionReg is a constant, so this separates the two explanations for a
+// reader that answers but never completes a transaction:
+//   - stable and valid only at low clocks -> signal integrity, i.e. the
+//     missing level shifter. Slowing down is a usable workaround.
+//   - unstable or wrong at EVERY clock    -> not signal integrity. Suspect
+//     power (the module needs 3.3 V), a broken part, or a wiring error.
+// Valid answers are 0x91/0x92 (genuine) or 0x12/0x88 (common clones).
+void diagRfidSpi() {
+    static const uint32_t CLOCKS[] = {
+        4000000UL, 2000000UL, 1000000UL, 500000UL, 250000UL, 125000UL
+    };
+    for (uint8_t c = 0; c < 6; c++) {
+        uint8_t first = 0, diff = 0;
+        for (uint8_t i = 0; i < 20; i++) {
+            SPI.beginTransaction(SPISettings(CLOCKS[c], MSBFIRST, SPI_MODE0));
+            digitalWrite(RFID_SS, LOW);
+            // MFRC522 read frame: bit7 = 1 for read, address in bits 6..1.
+            SPI.transfer(0x80 | ((0x37 << 1) & 0x7E));   // VersionReg = 0x37
+            uint8_t v = SPI.transfer(0);
+            digitalWrite(RFID_SS, HIGH);
+            SPI.endTransaction();
+            if (i == 0) first = v;
+            else if (v != first) diff++;
+        }
+        Serial.print(F("E,rfid spi "));
+        Serial.print(CLOCKS[c] / 1000UL);
+        Serial.print(F("kHz ver 0x"));
+        if (first < 0x10) Serial.print('0');
+        Serial.print(first, HEX);
+        Serial.print(F(" unstable "));
+        Serial.print(diff);
+        Serial.println(F("/19"));
+    }
+}
+
+void diagRfidIr() {
+    // VersionReg is a CONSTANT. Reading it 20 times and getting more than one
+    // answer is proof of a marginal SPI link — which is the difference between
+    // "no tag was presented" and "this reader can never work". Without this
+    // check a flaky link is invisible: any single read looks plausible.
+    uint8_t first = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+    uint8_t differing = 0;
+    for (uint8_t i = 0; i < 20; i++) {
+        if (rfid.PCD_ReadRegister(MFRC522::VersionReg) != first) differing++;
+    }
+    Serial.print(F("E,rfid VersionReg 0x"));
+    if (first < 0x10) Serial.print('0');
+    Serial.print(first, HEX);
+    Serial.print(F(" unstable "));
+    Serial.print(differing);
+    Serial.print(F("/20 present "));
+    Serial.println(rfid_present ? 1 : 0);
+
+    // The antenna is the difference between "no tag was presented" and "this
+    // reader physically cannot see one". drops counts whole-chip resets.
+    uint8_t tx = rfid.PCD_ReadRegister(MFRC522::TxControlReg);
+    Serial.print(F("E,rfid TxControl 0x"));
+    Serial.print(tx, HEX);
+    Serial.print((tx & 0x03) == 0x03 ? F(" ANTENNA-ON") : F(" ANTENNA-OFF"));
+    Serial.print(F(" drops "));
+    Serial.println(rfid_antenna_drops);
+
+    // Read the card-detect timeout back. If these are not what rfidProbe wrote,
+    // the write never landed and every poll costs the full 36 ms.
+    Serial.print(F("E,rfid TReload "));
+    Serial.print(rfid.PCD_ReadRegister(MFRC522::TReloadRegH));
+    Serial.print('/');
+    Serial.print(rfid.PCD_ReadRegister(MFRC522::TReloadRegL));
+    Serial.print(F(" want 0/"));
+    Serial.println(RFID_TIMER_TICKS);
+
+    Serial.print(F("E,ir pin "));
+    Serial.print(digitalRead(IR_PIN));
+    Serial.print(F(" occupied "));
+    Serial.println(ir_state ? 1 : 0);
+
+    Serial.print(F("E,rfid poll last "));
+    Serial.print(rfid_poll_us);
+    Serial.print(F("us max "));
+    Serial.print(rfid_poll_max_us);
+    Serial.println(F("us"));
+
+    Serial.print(F("E,loop "));
+    Serial.print(loop_rate_hz);
+    Serial.println(F(" Hz"));
+
+    Serial.print(F("E,doors state "));
+    Serial.print(door_state == DOOR_OPEN   ? F("OPEN")
+               : door_state == DOOR_CLOSED ? F("CLOSED")
+                                           : F("MOVING"));
+    Serial.print(F(" L "));
+    Serial.print(door_pos_l, 1);
+    Serial.print(F(" R "));
+    Serial.println(door_pos_r, 1);
+}
+
 void runDiag() {
     Serial.println(F("E,DIAG start"));
     diagI2C();
     diagSonar();
+    diagRfidSpi();
+    diagRfidIr();
     Serial.println(F("E,DIAG done"));
 }
 
@@ -1280,8 +2017,14 @@ void handleLine(char *line) {
         case 'Z':
             runDiag();
             break;
-        case 'O':   // doors — not fitted
+        case 'O':
+            doorCommand(true);
+            break;
         case 'C':
+            doorCommand(false);
+            break;
+        case 'H':   // "the doors are physically HERE" — believe it, move nothing
+            if (line[1] == ',') doorAssume(line[2] == '1');
             break;
         case 'L':   // status text from ROS -> bottom LCD row
             if (line[1] == ',') lcdSetRow(3, line + 2);
@@ -1329,6 +2072,32 @@ void setup() {
     pinMode(SONAR_ECHO, INPUT);
     digitalWrite(SONAR_TRIG, LOW);
 
+    // INPUT_PULLUP, so an unplugged IR sensor reads HIGH — which with
+    // IR_OCCUPIED_LEVEL == LOW means "empty". A floating pin that drifted to
+    // "occupied" would hang the mission in WAIT_PACKAGE_REMOVAL forever.
+    pinMode(IR_PIN, INPUT_PULLUP);
+
+    // DELIBERATELY does not attach or drive the servos.
+    //
+    // An earlier version parked the doors here with a bare doorApply(), which
+    // is an unrestrained full-speed jump to the closed angle. Every flash and
+    // every board reset re-ran it, so an arm that happened to be open was
+    // driven the whole sweep into the door frame at the SG90's ~600 deg/s and
+    // stalled there. That destroyed the left servo, and a stalled SG90 pulling
+    // ~700 mA dragged the 5 V rail down far enough that the board stopped
+    // booting at all. The easing in doorTick did not help, because this path
+    // bypassed it completely.
+    //
+    // A servo with no signal is limp and draws nothing, which is the right
+    // state for an unknown door position. The doors rest closed mechanically,
+    // so door_state starts CLOSED — but nothing is COMMANDED until the host
+    // asks, and when it does, doorCommand eases over the full travel time
+    // instead of stepping. See doorAttach().
+    door_pos_l = LEFT_CLOSE_DEG;
+    door_pos_r = RIGHT_CLOSE_DEG;
+    door_state = DOOR_CLOSED;
+    doorRestore();      // may correct the above to OPEN — see doorRestore()
+
     Serial.begin(SERIAL_BAUD);
     delay(200);
 
@@ -1351,6 +2120,10 @@ void setup() {
     imuInit();
     ina219Init();
     lcdInit();
+
+    SPI.begin();
+    rfidProbe(true);
+
     if (lcd_present) lcdSetRow(3, "Calibrating gyro...");
     gyroCalibrate();       // robot must be stationary at power-up
     if (lcd_present) lcdSetRow(3, imu_addr ? "Ready" : "Ready (no IMU)");
@@ -1360,6 +2133,13 @@ void setup() {
     last_cmd_ms = millis();
     imu_next_ms = millis();
     sonar_next_ms = millis();
+
+    // Publish the starting door and compartment state so a subscriber that
+    // connects later is not left guessing until something physically changes.
+    ir_state = ir_candidate = (digitalRead(IR_PIN) == IR_OCCUPIED_LEVEL);
+    ir_stable_ms = millis();
+    irReport();
+    doorReport();
 }
 
 void loop() {
@@ -1371,9 +2151,23 @@ void loop() {
     spwmTick();
     ina219Tick();
     spwmTick();
+    doorTick();
+    doorReleaseTick();
+    irTick();
+    spwmTick();
+    rfidTick();
+    spwmTick();
     lcdRefresh();
     lcdTick();
     spwmTick();
+
+    // Loop rate, sampled once a second. Cheap: one increment per pass.
+    loop_count++;
+    if ((long)(millis() - loop_rate_ms) >= 0) {
+        loop_rate_hz = loop_count;
+        loop_count = 0;
+        loop_rate_ms = millis() + 1000UL;
+    }
 
     // Watchdog: stop if the host goes quiet. Raw M/W/Y commands latch for
     // bench testing and are exempt — send S (or reset) to clear.
