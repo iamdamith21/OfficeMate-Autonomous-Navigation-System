@@ -1843,8 +1843,12 @@ void diagRfidIr() {
     Serial.print(rfid.PCD_ReadRegister(MFRC522::TReloadRegH));
     Serial.print('/');
     Serial.print(rfid.PCD_ReadRegister(MFRC522::TReloadRegL));
-    Serial.print(F(" want 0/"));
-    Serial.println(RFID_TIMER_TICKS);
+    // Split the same way rfidConfigure writes it, or a healthy 3/232 looks
+    // like a mismatch against a 16-bit 1000.
+    Serial.print(F(" want "));
+    Serial.print((uint8_t)(RFID_TIMER_TICKS >> 8));
+    Serial.print('/');
+    Serial.println((uint8_t)(RFID_TIMER_TICKS & 0xFF));
 
     Serial.print(F("E,ir pin "));
     Serial.print(digitalRead(IR_PIN));
