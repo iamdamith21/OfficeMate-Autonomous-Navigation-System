@@ -292,15 +292,26 @@
 #define SERVO_L   44
 #define SERVO_R   45
 
-// The LEFT door's servo is mechanically destroyed (stripped gears) and not yet
-// replaced. A dead servo still draws stall current when driven, and that is
-// what has repeatedly collapsed the 5 V rail and stopped the Mega booting
-// mid-test. So it is never attached and never driven: doorTick moves only the
-// right arm, while the door STATE machine and its A,DOORS acks behave exactly
-// as normal, which keeps the delivery mission FSM fully testable.
+// The LEFT servo was replaced and re-enabled on 2026-08-01. Set this to 0 again
+// if it ever fails: a dead servo still draws stall current when driven, and
+// that is what repeatedly collapsed the 5 V rail and stopped the Mega booting
+// mid-test. With it 0, doorTick moves only the right arm while the door STATE
+// machine and its A,DOORS acks behave normally, which keeps the delivery
+// mission FSM fully testable.
 //
-// Set back to 1 once the servo is replaced.
-#define DOOR_LEFT_PRESENT  0
+// The replacement was verified BEFORE being enabled here, with the arm
+// UNCOUPLED from the door, using fw_testing/left_servo_probe. That sketch
+// drives only D44, commands nothing in setup(), and makes its first attach at
+// 90 deg -- identical to Servo::attach()'s own 1500 us default -- so the horn
+// cannot lunge while its true orientation is still unknown. The probe confirmed
+// this servo reaches LEFT_CLOSE_DEG 175 without grinding, and that 175 is
+// genuinely the closed orientation for how the new horn is mounted, so no
+// endpoint swap was needed. Note 175 deg is 2348 us, only 2 us inside the
+// SERVO_US_MAX clamp -- there is no margin left at that end.
+//
+// Verified after enabling: two open/close cycles through /doors/open and
+// /doors/close, both arms driven together, with no reset and no brownout.
+#define DOOR_LEFT_PRESENT  1
 
 // ─── Robot parameters (match URDF properties.xacro) ───────────────────────
 #define WHEEL_RADIUS    0.065f
