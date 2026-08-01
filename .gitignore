@@ -43,3 +43,6 @@ Thumbs.db
 *.yaml.bak
 *.yaml.prefast
 *.bak
+
+# Local-only demo notes (kept off the remote by request)
+DEMO_RUNBOOK.md
