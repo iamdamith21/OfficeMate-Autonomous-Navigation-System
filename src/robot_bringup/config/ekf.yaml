@@ -52,15 +52,29 @@ ekf_filter_node:
     # MPU6500 — gyro yaw rate only (no orientation estimate on /imu/data_raw).
     # Accel is deliberately not fused: the part reads ~10.32 m/s^2 for gravity
     # (~5% scale error), which would bias any velocity integrated from it.
-    imu0: /imu/data_raw
-    imu0_config: [false, false, false,
-                  false, false, false,
-                  false, false, false,
-                  false, false, true,
-                  false, false, false]
-    imu0_differential: false
-    imu0_remove_gravitational_acceleration: true
-    imu0_queue_size: 10
+    # IMU DISABLED 2026-08-01 — laser odometry only, on the user's report that
+    # navigation behaved two days ago before the gyro was in the loop.
+    #
+    # Safe to drop: odom0 above already supplies BOTH vx and vyaw, so nothing
+    # structural is lost; the gyro was only a second opinion on yaw-rate.
+    #
+    # Specific reason to suspect it right now: gyroCalibrate() runs with a Wire
+    # timeout armed since the cold-boot fix, and the firmware's own note says an
+    # armed timeout wrecks the 14-byte burst read. A calibration that collected
+    # degraded samples yields a biased gyro zero, which integrates into yaw
+    # drift and would decay AMCL exactly the way it did (81% -> 27% while
+    # standing still).
+    #
+    # Restore with: cp ekf.yaml.with_imu ekf.yaml
+    # imu0: /imu/data_raw
+    # imu0_config: [false, false, false,
+    #               false, false, false,
+    #               false, false, false,
+    #               false, false, true,
+    #               false, false, false]
+    # imu0_differential: false
+    # imu0_remove_gravitational_acceleration: true
+    # imu0_queue_size: 10
 
     # Process noise. Only the entries that matter here are tuned; the rest keep
     # robot_localization's defaults.
