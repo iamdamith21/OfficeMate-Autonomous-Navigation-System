@@ -554,9 +554,14 @@
 // An earlier version used 157 here, inferred from that sketch's sweep loop
 // writing RIGHT_CLOSE + i for i up to 72. That was wrong: it drove the right
 // door 7 degrees past its declared endpoint, into the frame.
-#define LEFT_CLOSE_DEG    175
-#define LEFT_OPEN_DEG      90
-#define RIGHT_CLOSE_DEG    85
+// Measured on the rebuilt left arm 2026-08-01 (full_servo_door (1).ino).
+// 180 deg is the Servo library's 2400 us end and SG90s usually hit their
+// internal stop before it. doorAngleToUs clamps to SERVO_US_MAX 2350 us,
+// so this commands ~175.4 deg in practice -- the clamp is what makes 180
+// safe to write here. Do NOT raise SERVO_US_MAX to "honour" it.
+#define LEFT_CLOSE_DEG    180
+#define LEFT_OPEN_DEG     125
+#define RIGHT_CLOSE_DEG    78
 #define RIGHT_OPEN_DEG    150
 // One servo frame. The SG90 latches exactly one pulse per 20 ms frame, so
 // updating faster than this is wasted work.
@@ -2070,7 +2075,44 @@ void readSerial() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Walk a stuck I2C slave off the bus before Wire touches it.
+//
+// Wire deliberately runs with NO timeout here (see the note by Wire.begin), so
+// a slave left mid-transaction by a reset holds SDA low and blocks forever --
+// which is exactly how v11 came back from the door-calibration sketches: dead
+// silent, yet flashing and enumerating normally. Clocking SCL lets the slave
+// finish the byte it was pushing and release SDA. Pins are driven open-drain
+// style (INPUT = released high, OUTPUT LOW = driven low) so this is safe even
+// if the bus is already idle.
+static void i2cUnwedgeBus() {
+    pinMode(SDA, INPUT_PULLUP);
+    pinMode(SCL, INPUT_PULLUP);
+    delayMicroseconds(10);
+    if (digitalRead(SDA) == HIGH) return;          // bus already free
+
+    for (uint8_t i = 0; i < 9 && digitalRead(SDA) == LOW; i++) {
+        pinMode(SCL, OUTPUT); digitalWrite(SCL, LOW);
+        delayMicroseconds(5);
+        pinMode(SCL, INPUT_PULLUP);                 // release, pull-up raises it
+        delayMicroseconds(5);
+    }
+    // STOP: SDA low->high while SCL is high.
+    pinMode(SDA, OUTPUT); digitalWrite(SDA, LOW);
+    delayMicroseconds(5);
+    pinMode(SCL, INPUT_PULLUP);
+    delayMicroseconds(5);
+    pinMode(SDA, INPUT_PULLUP);
+    delayMicroseconds(10);
+}
+
 void setup() {
+    // FIRST, before anything that can block. This used to sit after the motor,
+    // sonar, IR, EEPROM, I2C and SPI setup, so a hang in any of them produced a
+    // completely silent board that looked bricked.
+    Serial.begin(SERIAL_BAUD);
+    delay(200);
+    Serial.println(F("S,BOOT,setup entered"));
+
     for (uint8_t i = 0; i < 4; i++) {
         pinMode(CH[i].en,  OUTPUT);
         pinMode(CH[i].ina, OUTPUT);
@@ -2113,8 +2155,11 @@ void setup() {
     door_state = DOOR_CLOSED;
     doorRestore();      // may correct the above to OPEN — see doorRestore()
 
-    Serial.begin(SERIAL_BAUD);
-    delay(200);
+    // Clock a stuck SLAVE off the bus before Wire touches it. This is NOT the
+    // same as i2cRecover() above, which re-inits the AVR master peripheral and
+    // cannot free a slave that is holding SDA low mid-byte.
+    Serial.println(F("S,BOOT,i2c unwedge"));
+    i2cUnwedgeBus();
 
     // 400 kHz keeps the 14-byte burst read near 350 us. At the default
     // 100 kHz it would be ~1.4 ms — a quarter of a PWM period, every 20 ms.
@@ -2132,14 +2177,17 @@ void setup() {
     // A hung bus is the rarer and more visible failure — and mpuReadRaw already
     // returns false on any error, so a genuinely dead bus degrades to "no IMU"
     // rather than corrupt data.
+    Serial.println(F("S,BOOT,imu"));
     imuInit();
     ina219Init();
     lcdInit();
 
     SPI.begin();
+    Serial.println(F("S,BOOT,rfid"));
     rfidProbe(true);
 
     if (lcd_present) lcdSetRow(3, "Calibrating gyro...");
+    Serial.println(F("S,BOOT,gyro"));
     gyroCalibrate();       // robot must be stationary at power-up
     if (lcd_present) lcdSetRow(3, imu_addr ? "Ready" : "Ready (no IMU)");
 

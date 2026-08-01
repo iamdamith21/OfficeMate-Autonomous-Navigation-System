@@ -107,7 +107,9 @@ controller_server:
     # publishers here (rf2o publishes /odom_rf2o, the EKF /odometry/filtered).
     # The controller therefore saw the robot as permanently stationary.
     odom_topic: /odometry/filtered
-    controller_frequency: 5.0   # was 10.0 — reduced for Pi 4B CPU headroom
+    controller_frequency: 8.0   # was 5.0. 5 Hz produced a 200 ms velocity
+    # staircase (the jerk). Raised together with halving the lidar beam count,
+    # because on a saturated CPU a faster loop just arrives late.
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -172,9 +174,11 @@ controller_server:
       use_regulated_linear_velocity_scaling: true   # slow near tight curves
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.25
-      use_cost_regulated_linear_velocity_scaling: true  # slow near obstacles
+      use_cost_regulated_linear_velocity_scaling: false  # was true: in this
+      # tight room nearly every legal cell is inflated, so this throttled the
+      # robot everywhere and made desired_linear_vel meaningless.
       regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.15
+      regulated_linear_scaling_min_speed: 0.22
       use_rotate_to_heading: true      # let RPP also handle small heading fixes
       rotate_to_heading_min_angle: 0.785
       # true so a robot wedged inside its own circumscribed radius has a
@@ -299,7 +303,9 @@ local_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         cost_scaling_factor: 3.0       # decay rate (higher = sharper)
-        inflation_radius: 0.45         # ≥ circumscribed radius (0.30m) + margin
+        inflation_radius: 0.38         # was 0.45. Still > the 0.30 m
+        # circumscribed radius so the real lethal ring is unchanged; this only
+        # shrinks the decay skirt that made every cell look expensive.
 
 # ── Global costmap (full map) ─────────────────────────────────────────────────
 global_costmap:
@@ -345,7 +351,7 @@ global_costmap:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
         cost_scaling_factor: 3.0
-        inflation_radius: 0.45
+        inflation_radius: 0.38
 
       # KeepoutFilter reads from /costmap_filter_info (published by
       # costmap_filter_info_server when use_keepout_filter:=true).

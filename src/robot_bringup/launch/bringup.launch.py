@@ -131,6 +131,15 @@ def generate_launch_description():
             'device_model': 'LTME-02A',
             'device_address': LaunchConfiguration('ltme_address'),
             'frame_id': 'laser',
+            # Average adjacent beams: 769 -> ~385 per scan. Everything
+            # downstream is per-beam work -- rf2o (34.6% CPU), amcl (12.2%) and
+            # both costmaps -- and the Pi was running at load 8.10 on 4 cores,
+            # so controller_server could not hold even 5 Hz and the stale local
+            # costmap read as "collision ahead" in an empty corridor. Halving
+            # the beams is what buys the headroom for an 8 Hz control loop.
+            # 270 deg over ~385 beams is still ~0.7 deg resolution, far finer
+            # than the 5 cm map grid needs.
+            'average_factor': 2,
         }],
         output='screen',
         respawn=True,
