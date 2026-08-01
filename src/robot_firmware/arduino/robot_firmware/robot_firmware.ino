@@ -2088,9 +2088,11 @@ static void i2cUnwedgeBus() {
     pinMode(SDA, INPUT_PULLUP);
     pinMode(SCL, INPUT_PULLUP);
     delayMicroseconds(10);
-    if (digitalRead(SDA) == HIGH) return;          // bus already free
-
-    for (uint8_t i = 0; i < 9 && digitalRead(SDA) == LOW; i++) {
+    // Pulse unconditionally. This used to return early when SDA read high, but
+    // a slave can be mid-transaction without holding SDA low at the instant we
+    // sample it, and boot then hung in imuInit(). Nine clocks on an idle bus
+    // are harmless: no START is issued, so nothing can read them as addressing.
+    for (uint8_t i = 0; i < 9; i++) {
         pinMode(SCL, OUTPUT); digitalWrite(SCL, LOW);
         delayMicroseconds(5);
         pinMode(SCL, INPUT_PULLUP);                 // release, pull-up raises it
@@ -2177,10 +2179,16 @@ void setup() {
     // A hung bus is the rarer and more visible failure — and mpuReadRaw already
     // returns false on any error, so a genuinely dead bus degrades to "no IMU"
     // rather than corrupt data.
+    // Arm a timeout for the INIT calls only. A permanently armed timeout breaks
+    // the steady-state IMU burst read on this rig (see the note by Wire.begin),
+    // but during init a wedged device hangs the whole board forever -- which is
+    // exactly what happened here, boot stopping dead after "S,BOOT,imu".
+    Wire.setWireTimeout(25000 /* us */, true /* reset_on_timeout */);
     Serial.println(F("S,BOOT,imu"));
     imuInit();
     ina219Init();
     lcdInit();
+    Serial.println(F("S,BOOT,i2c init done"));
 
     SPI.begin();
     Serial.println(F("S,BOOT,rfid"));
@@ -2189,6 +2197,10 @@ void setup() {
     if (lcd_present) lcdSetRow(3, "Calibrating gyro...");
     Serial.println(F("S,BOOT,gyro"));
     gyroCalibrate();       // robot must be stationary at power-up
+    // Boot is over: disarm. An armed timeout breaks the steady-state burst read
+    // on this rig, so it protects setup() only. Wire.begin() clears the setting.
+    Wire.begin();
+    Wire.setClock(I2C_CLOCK_HZ);
     if (lcd_present) lcdSetRow(3, imu_addr ? "Ready" : "Ready (no IMU)");
 
     Serial.print(F("S,READY,"));
