@@ -1,9 +1,8 @@
 # ekf.yaml — robot_localization EKF fusing rf2o laser odometry with the
-# MPU6500 gyro. The gyro was disabled 2026-08-01 after a biased calibration
-# was proven to decay AMCL, then RE-ENABLED 2026-08-02 after fixing the actual
-# firmware bug that biased it (gyroCalibrate() was running with an I2C Wire
-# timeout still armed -- see robot_firmware.ino setup(), fixed same day).
-# Config matrices are
+# MPU9250 gyro (via robot_interface/arduino_bridge).
+#
+# Why: rf2o alone drifts during pure rotation and in feature-poor corridors;
+# the gyro yaw-rate pins rotation down. Config matrices are
 #   [x, y, z, roll, pitch, yaw, vx, vy, vz, vroll, vpitch, vyaw, ax, ay, az]
 #
 # This node owns the odom -> base_footprint TF (rf2o publish_tf is disabled
@@ -29,9 +28,9 @@ ekf_filter_node:
     world_frame: odom
 
     # rf2o laser odometry — take linear velocity (vx) AND yaw-rate (vyaw).
-    # rf2o supplies rotation from scan matching so the robot turns correctly
-    # even when the Arduino/gyro is not connected; when the gyro IS available
-    # the EKF fuses both (imu0 also provides vyaw) for a better yaw estimate.
+    # In this no-IMU variant rf2o is the SOLE source of both. Linear vx is
+    # trustworthy (rf2o tracks translation to within 2% here); yaw is not, for
+    # the reason spelled out below the odom0 block.
     odom0: /odom_rf2o
     odom0_config: [false, false, false,
                    false, false, false,
@@ -47,37 +46,21 @@ ekf_filter_node:
     # only 74.8 deg. Override it so the gyro, which is accurate precisely in
     # that regime, actually wins the argument. Linear vx is left trusted:
     # rf2o tracks translation to within 2% here.
-    #
-    # 2026-08-01: briefly raised to 8.0 while the gyro was disabled (laser was
-    # the only yaw source, so nothing to reject toward). 2026-08-02: reverted
-    # to 5.0 now the gyro is back with its calibration bug actually fixed --
-    # see the note below imu0.
     odom0_pose_rejection_threshold: 5.0
-    odom0_twist_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 8.0
 
-    # MPU6500 — gyro yaw rate only (no orientation estimate on /imu/data_raw).
-    # Accel is deliberately not fused: the part reads ~10.32 m/s^2 for gravity
-    # (~5% scale error), which would bias any velocity integrated from it.
+    # NO IMU. The gyro is deliberately not fused in this variant, so yaw comes
+    # from rf2o scan matching alone.
     #
-    # Disabled 2026-08-01 after a biased gyro calibration was measured to decay
-    # AMCL (81% -> 27% while standing still). Root cause found and fixed
-    # 2026-08-02: gyroCalibrate() in robot_firmware.ino ran while an I2C Wire
-    # timeout was still armed from the cold-boot-hang fix, and the firmware's
-    # own measurement says an armed timeout drops the 14-byte burst read
-    # essentially every time (vs 19/20 with it disarmed) -- so calibration was
-    # averaging a sparse, degraded sample set into a biased zero. Fixed by
-    # disarming the timeout before gyroCalibrate() instead of after. Re-enabled
-    # here with the fix in place; re-measure with turntest.py / a fresh map if
-    # heading drift reappears.
-    imu0: /imu/data_raw
-    imu0_config: [false, false, false,
-                  false, false, false,
-                  false, false, false,
-                  false, false, true,
-                  false, false, false]
-    imu0_differential: false
-    imu0_remove_gravitational_acceleration: true
-    imu0_queue_size: 10
+    # KNOWN COST, measured on this rig: rf2o UNDER-reads pure rotation badly —
+    # a real 105 deg pivot was reported as 74.8 deg (-29%). The gyro existed
+    # precisely to win that argument, because scan matching is at its weakest
+    # exactly when the robot pivots. Without it the EKF will believe the robot
+    # has turned less than it has, so expect over-rotation and degraded heading.
+    #
+    # Because rf2o is now the ONLY yaw source, its yaw can no longer be
+    # distrusted the way it is in ekf.yaml -- rejecting it would leave nothing.
+    # The twist rejection threshold is therefore raised rather than tightened.
 
     # Process noise. Only the entries that matter here are tuned; the rest keep
     # robot_localization's defaults.
@@ -86,11 +69,6 @@ ekf_filter_node:
     # genuinely good yaw-rate source (measured noise sd 0.0025 rad/s), so the
     # filter should trust its own propagated yaw rate rather than chase rf2o's
     # noisier estimate. This is what stops the heading wandering mid-turn.
-    #
-    # 2026-08-01: briefly reverted to the stock 0.01 while the gyro was
-    # disabled (nothing informed was backing the propagation then). 2026-08-02:
-    # back to 0.004 now the gyro's calibration bug is fixed -- see the imu0
-    # note above.
     process_noise_covariance: [0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
                                0.0,  0.05, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,
                                0.0,  0.0,  0.06, 0.0,  0.0,  0.0,  0.0,  0.0,  0.0,  0.0,   0.0,   0.0,   0.0,  0.0,  0.0,

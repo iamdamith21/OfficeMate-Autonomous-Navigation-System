@@ -36,12 +36,11 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     pkg            = FindPackageShare("robot_navigation")
-    bringup_share  = FindPackageShare("robot_bringup")
     nav2_params    = PathJoinSubstitution([pkg, "nav2", "nav2_params.yaml"])
     cf_params      = PathJoinSubstitution([pkg, "nav2", "costmap_filter_params.yaml"])
     bt_xml         = PathJoinSubstitution([pkg, 'behavior_trees',
                                            'navigate_w_replanning_and_recovery.xml'])
-    default_map    = os.path.join(os.path.expanduser('~'), 'maps', 'my_map.yaml')
+    default_map    = '/home/damith-raspberry/maps/server_room.yaml'
     default_mask   = PathJoinSubstitution([pkg, 'maps', 'keepout_mask.yaml'])
 
     # ── Launch arguments ─────────────────────────────────────────────────────
@@ -59,11 +58,13 @@ def generate_launch_description():
     # ── Robot hardware bringup ────────────────────────────────────────────────
     bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
-            PathJoinSubstitution([bringup_share, 'launch', 'bringup.launch.py'])
+            PathJoinSubstitution([
+                FindPackageShare("robot_bringup"),
+                "launch",
+                "bringup.launch.py",
+            ])
         ]),
-        launch_arguments={
-            'arduino_dev': LaunchConfiguration('arduino_dev'),
-        }.items(),
+        launch_arguments={"arduino_dev": LaunchConfiguration("arduino_dev")}.items(),
     )
 
     # ── Localisation: map_server + AMCL ──────────────────────────────────────

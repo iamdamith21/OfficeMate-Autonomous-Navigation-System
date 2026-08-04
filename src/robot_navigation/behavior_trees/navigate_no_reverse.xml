@@ -1,0 +1,51 @@
+<!--
+  navigate_no_reverse.xml — 2026-08-03
+
+  Nav2's stock navigate_to_pose_w_replanning_and_recovery.xml with the
+  <BackUp> recovery REMOVED.
+
+  Why: the LTME-02A scans -135..+135 deg, leaving a 90 deg BLIND WEDGE directly
+  behind the robot. The stock tree's `<BackUp backup_dist="0.30"
+  backup_speed="0.05"/>` reverses 30 cm into that wedge as a recovery — i.e.
+  exactly when the robot is already confused about its surroundings — and it is
+  how the robot backed into chairs. behavior_server no longer loads the `backup`
+  plugin, so leaving the node in the tree would give a BT action node with no
+  server to connect to and fail the whole recovery branch.
+
+  Recovery order is deliberate: ClearingActions wipes the local costmap, and
+  with a blind rear arc that also erases the only record of what is behind the
+  robot. Wait now runs BEFORE Spin so fresh scans can re-mark the sensed 270 deg
+  before the footprint is swept through it. The rear stays unknown either way —
+  that is inherent to the sensor, not something a tree can fix.
+
+  Everything else is byte-identical to the stock tree.
+-->
+<root main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="GridBased"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="FollowPath"/>
+          <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="RecoveryActions">
+          <Sequence name="ClearingActions">
+            <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <Wait wait_duration="5"/>
+          <Spin spin_dist="1.57"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

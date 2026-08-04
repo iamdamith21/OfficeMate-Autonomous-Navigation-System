@@ -28,9 +28,9 @@
   <xacro:property name="panel_thickness" value="0.012"/>
   <xacro:property name="chassis_thickness" value="0.020"/>
 
-  <!-- ── Drive wheels (130 mm Ø, 60 mm wide) ── -->
-  <xacro:property name="wheel_radius" value="0.065"/>
-  <xacro:property name="wheel_width"  value="0.060"/>
+  <!-- ── Drive wheels (85 mm Ø, 45 mm wide) ── -->
+  <xacro:property name="wheel_radius" value="0.0425"/>
+  <xacro:property name="wheel_width"  value="0.045"/>
   <xacro:property name="wheel_y_offset" value="0.165"/>
   <!-- 4WD skid-steer half-wheelbase. PLACEHOLDER: real front↔rear axle / 2 -->
   <xacro:property name="wheel_x_offset" value="0.150"/>

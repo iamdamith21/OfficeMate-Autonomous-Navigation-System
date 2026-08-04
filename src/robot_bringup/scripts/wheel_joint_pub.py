@@ -17,7 +17,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from nav_msgs.msg import Odometry
 
-WHEEL_RADIUS   = 0.065   # m
+WHEEL_RADIUS   = 0.0425  # m (85 mm diameter)
 WHEEL_Y_OFFSET = 0.165   # m
 
 class WheelJointPub(Node):
@@ -28,7 +28,7 @@ class WheelJointPub(Node):
         self._last_ns    = None
 
         self.sub = self.create_subscription(
-            Odometry, '/odometry/filtered', self._odom_cb,
+            Odometry, '/odom', self._odom_cb,
             rclpy.qos.QoSProfile(depth=5))
         self.pub = self.create_publisher(
             JointState, '/wheel_joint_states', 10)

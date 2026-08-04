@@ -21,7 +21,7 @@ source /opt/ros/humble/setup.bash
 source $HOME/ros2_ws/install/setup.bash
 
 ros2 run mission_manager location_manager --ros-args \
-    -p map_name:=office_map_v2 \
+    -p map_name:=faculty_map \
     -p locations_file:=$HOME/maps/locations.json &
 sleep 3
 exec ros2 run mission_manager delivery_manager --ros-args \

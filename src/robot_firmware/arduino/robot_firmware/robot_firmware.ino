@@ -2190,6 +2190,18 @@ void setup() {
     lcdInit();
     Serial.println(F("S,BOOT,i2c init done"));
 
+    // FIXED 2026-08-02: disarm the timeout HERE, right after the last I2C init
+    // call that needs wedge protection (lcdInit above), and BEFORE
+    // gyroCalibrate(). It used to stay armed straight through calibration and
+    // only get cleared afterwards -- so calibration ran under the exact
+    // condition the note above measures as breaking the burst read (<50% of
+    // samples collected), producing a biased gyro zero that this rig's own
+    // AMCL decay (81% -> 27% while standing still) and mapping heading drift
+    // both trace back to. gyroCalibrate() now gets the same clean-bus
+    // conditions the note says score 19/20.
+    Wire.begin();
+    Wire.setClock(I2C_CLOCK_HZ);
+
     SPI.begin();
     Serial.println(F("S,BOOT,rfid"));
     rfidProbe(true);
@@ -2197,10 +2209,6 @@ void setup() {
     if (lcd_present) lcdSetRow(3, "Calibrating gyro...");
     Serial.println(F("S,BOOT,gyro"));
     gyroCalibrate();       // robot must be stationary at power-up
-    // Boot is over: disarm. An armed timeout breaks the steady-state burst read
-    // on this rig, so it protects setup() only. Wire.begin() clears the setting.
-    Wire.begin();
-    Wire.setClock(I2C_CLOCK_HZ);
     if (lcd_present) lcdSetRow(3, imu_addr ? "Ready" : "Ready (no IMU)");
 
     Serial.print(F("S,READY,"));

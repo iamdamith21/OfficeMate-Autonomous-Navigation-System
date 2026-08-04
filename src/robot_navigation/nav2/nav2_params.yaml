@@ -12,16 +12,6 @@
 #   wheel_sep  : 0.33 m     wheel_radius : 0.065 m
 #   max speed  : 0.25 m/s   max ω        : 1.0 rad/s
 #
-# ANGULAR TUNING (2026-07-27): every angular limit used to sit at 0.20 rad/s,
-# which was the robot's measured full-PWM ceiling on a tired battery. Capping
-# the command at the saturation point left no proportional band at all — every
-# turn request became "full deflection", which is exactly why turning felt slow
-# AND jerky. Now 0.50 rad/s, with the firmware's pivot gain rescaled to match
-# so 0.50 rad/s maps onto full PWM. Turns are faster and, more importantly,
-# actually modulated. The real MPU6500 gyro (fitted 2026-07-27) is what makes
-# the higher rate safe: rotation used to wreck localisation because rf2o alone
-# cannot track a pivot.
-#
 # Odom source : EKF (rf2o + IMU gyro) → /odometry/filtered  (TF odom→base_footprint)
 # cmd_vel flow: controller_server → /cmd_vel_nav → velocity_smoother → /cmd_vel → robot
 # Low obstacles: HC-SR04 → /ultrasonic/range → local costmap range_layer
@@ -30,13 +20,10 @@
 amcl:
   ros__parameters:
     use_sim_time: false
-    # alpha1/alpha4 (the rotation-driven terms) halved now that a real gyro
-    # feeds the EKF — odometry during a pivot is far better than it was, so
-    # AMCL no longer needs to spread particles so widely on every turn.
-    alpha1: 0.1           # rot noise from rot
+    alpha1: 0.2           # rot noise from rot
     alpha2: 0.2           # rot noise from trans
     alpha3: 0.2           # trans noise from trans
-    alpha4: 0.1           # trans noise from rot
+    alpha4: 0.2           # trans noise from rot
     alpha5: 0.2           # trans noise from strafe
     base_frame_id: base_footprint
     global_frame_id: map
@@ -44,12 +31,12 @@ amcl:
     scan_topic: /scan
     robot_model_type: nav2_amcl::DifferentialMotionModel
     laser_model_type: likelihood_field
-    laser_likelihood_max_dist: 2.0
+    laser_likelihood_max_dist: 3.0
     laser_max_range: 12.0
     laser_min_range: 0.10
     max_beams: 60
-    max_particles: 1500   # was 3000 — halved for Pi 4B CPU headroom
-    min_particles: 300    # was 500
+    max_particles: 2000
+    min_particles: 500
     pf_err: 0.05
     pf_z: 0.99
     resample_interval: 1
@@ -66,10 +53,10 @@ amcl:
     do_beamskip: false
     lambda_slow: 0.001
     lambda_fast: 0.1
-    update_min_a: 0.1       # recompute after 0.1 rad rotation
-    update_min_d: 0.1       # recompute after 0.1 m translation
+    update_min_a: 0.05       # recompute after 0.05 rad rotation (tighter for smooth turns)
+    update_min_d: 0.05       # recompute after 0.05 m translation
     tf_broadcast: true
-    transform_tolerance: 1.0
+    transform_tolerance: 0.5
     save_pose_rate: 0.5
     set_initial_pose: true
     initial_pose: {x: 0.0, y: 0.0, z: 0.0, yaw: 0.0}
@@ -79,7 +66,7 @@ bt_navigator:
     use_sim_time: false
     global_frame: map
     robot_base_frame: base_footprint
-    odom_topic: /odometry/filtered
+    odom_topic: /odom
     # Tuned down from the 100 Hz/1 s defaults — a Pi 4B running the full
     # Nav2 stack (~10 processes) can't keep up with those under load,
     # which caused "tick rate exceeded" and action-ack timeouts that
@@ -103,13 +90,7 @@ bt_navigator:
 controller_server:
   ros__parameters:
     use_sim_time: false
-    # Was unset, so it silently defaulted to "odom" — a topic with zero
-    # publishers here (rf2o publishes /odom_rf2o, the EKF /odometry/filtered).
-    # The controller therefore saw the robot as permanently stationary.
-    odom_topic: /odometry/filtered
-    controller_frequency: 8.0   # was 5.0. 5 Hz produced a 200 ms velocity
-    # staircase (the jerk). Raised together with halving the lidar beam count,
-    # because on a saturated CPU a faster loop just arrives late.
+    controller_frequency: 5.0   # was 10.0 — reduced for Pi 4B CPU headroom
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
@@ -120,8 +101,8 @@ controller_server:
 
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.25
-      movement_time_allowance: 25.0
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
 
     general_goal_checker:
       stateful: true
@@ -135,56 +116,31 @@ controller_server:
       plugin: "nav2_rotation_shim_controller::RotationShimController"
       angular_dist_threshold: 0.785    # rotate in-place if heading error > 45°
       forward_sampling_distance: 0.5   # check if path goes forward this far
-      # 0.18 rad/s meant ~17 s to swing 180° before the robot even started
-      # following the path. This is the number that made navigation feel slow.
-      rotate_to_heading_angular_vel: 0.55
-      max_angular_accel: 1.5
+      rotate_to_heading_angular_vel: 0.60
+      max_angular_accel: 3.2
       simulate_ahead_time: 1.0
       primary_controller: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
 
       # Inner: RegulatedPurePursuitController
-      # Raised 0.18 -> 0.20 to sit at the measured ceiling (velocity_smoother
-      # max_velocity is 0.20 and 0.22 was erratic on the floor). This is the
-      # only speed headroom left on this robot and it is ~11%, so it will
-      # barely be perceptible: the slowness observed on 2026-07-31 was the
-      # robot STANDING STILL (cmd_vel contention, then the final-approach
-      # stall), not a low speed limit.
-      desired_linear_vel: 0.26         # m/s — target cruise speed (raised on request; above 0.20 rf2o tracking degrades)
-      # RPP does its own in-place rotation when use_rotate_to_heading is on;
-      # without these it would fall back to defaults and undo the shim's rate.
-      rotate_to_heading_angular_vel: 0.55
-      max_angular_accel: 1.5
+      desired_linear_vel: 0.25         # m/s — target cruise speed
       lookahead_dist: 0.40             # m   — base lookahead
       min_lookahead_dist: 0.30
       max_lookahead_dist: 0.90
       lookahead_time: 1.5              # s   — time-scaled lookahead
       use_velocity_scaled_lookahead_dist: true
-      # 0.05 m/s is below this drivetrain's stiction: 4WD skid-steer, no
-      # encoders, and floor calibration only ever verified clean tracking
-      # at 0.15 m/s. RPP scales toward this value over the last
-      # approach_velocity_scaling_dist metres, so the final approach asked
-      # for a speed the motors could not break loose at: the robot parked
-      # 0.24 m short (outside the 0.20 m xy tolerance) and controller_server
-      # replanned every 1.6 s forever while standing perfectly still, with
-      # nothing in the log naming a cause. Must stay above stiction.
-      min_approach_linear_velocity: 0.12
+      min_approach_linear_velocity: 0.05
       approach_velocity_scaling_dist: 0.6
       use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 0.6
+      max_allowed_time_to_collision_up_to_carrot: 1.0
       use_regulated_linear_velocity_scaling: true   # slow near tight curves
       use_fixed_curvature_lookahead: false
       curvature_lookahead_dist: 0.25
-      use_cost_regulated_linear_velocity_scaling: false  # was true: in this
-      # tight room nearly every legal cell is inflated, so this throttled the
-      # robot everywhere and made desired_linear_vel meaningless.
+      use_cost_regulated_linear_velocity_scaling: true  # slow near obstacles
       regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.22
+      regulated_linear_scaling_min_speed: 0.15
       use_rotate_to_heading: true      # let RPP also handle small heading fixes
       rotate_to_heading_min_angle: 0.785
-      # true so a robot wedged inside its own circumscribed radius has a
-      # legal move. It could previously neither rotate (footprint sweeps
-      # into the wall) nor reverse, which is a hard deadlock.
-      allow_reversing: true
+      allow_reversing: false
       max_robot_pose_search_dist: 10.0
       transform_tolerance: 0.5
 
@@ -266,34 +222,10 @@ local_costmap:
       # so clear_on_max_reading frees the cone again once the way is clear.
       range_layer:
         plugin: "nav2_costmap_2d::RangeSensorLayer"
-        # DISABLED 2026-07-31: the HC-SR04 publishes, but its readings are not
-        # trustworthy enough to mark a costmap. Measured with the robot
-        # STATIONARY facing a static scene, consecutive readings were
-        # 0.37 / 0.60 / 0.92 / 1.44 / 1.82 / 3.0 m -- that is noise, not a
-        # measurement. Combined with phi below (a 69 deg cone) every short
-        # reading painted a wide lethal arc straight ahead, so RPP reported
-        # "detected collision ahead!" continuously: the planner produced a good
-        # path, the robot wiggled in place, and every goal ABORTED with
-        # "Controller patience exceeded". Note this only started once the sonar
-        # began working -- while it returned -1 the layer cleared harmlessly.
-        #
-        # Re-enable ONLY after the sonar reads a stable distance while parked,
-        # and drop phi to about 0.26 rad first to match the HC-SR04's real
-        # ~15 deg beam; 1.2 rad over-marks enormously either way.
-        # The lidar obstacle_layer still handles obstacles, and the forward-stop
-        # clamp in arduino_bridge remains the low-obstacle safety net.
-        enabled: false
+        enabled: true
         topics: ["/ultrasonic/range"]
         phi: 1.2
         inflate_cone: 1.0
-        # MUST stay 0.0 (check disabled). A non-zero timeout makes
-        # RangeSensorLayer mark itself NOT CURRENT whenever the sonar pauses,
-        # which makes the whole local costmap stale, and controller_server then
-        # aborts follow_path every cycle -- silently, with no exception logged.
-        # Symptom: the planner produces a good path, the robot never moves, and
-        # nothing in the log says why. A brief sonar gap must never be able to
-        # immobilise the robot; the forward-stop clamp in arduino_bridge is the
-        # safety net for a genuinely dead sensor.
         no_readings_timeout: 0.0
         clear_threshold: 0.2
         mark_threshold: 0.8
@@ -302,10 +234,8 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        cost_scaling_factor: 3.0       # decay rate (higher = sharper)
-        inflation_radius: 0.38         # was 0.45. Still > the 0.30 m
-        # circumscribed radius so the real lethal ring is unchanged; this only
-        # shrinks the decay skirt that made every cell look expensive.
+        cost_scaling_factor: 2.5       # decay rate (gentler = smoother paths)
+        inflation_radius: 0.35         # 35cm from lidar center for obstacle avoidance
 
 # ── Global costmap (full map) ─────────────────────────────────────────────────
 global_costmap:
@@ -350,22 +280,15 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        cost_scaling_factor: 3.0
-        inflation_radius: 0.38
+        cost_scaling_factor: 2.5
+        inflation_radius: 0.35
 
       # KeepoutFilter reads from /costmap_filter_info (published by
       # costmap_filter_info_server when use_keepout_filter:=true).
-      #
-      # DISABLED by default 2026-07-27. The old comment claimed it "no-ops" if
-      # the info server is not running — it does not: it logs
-      # "KeepoutFilter: Filter mask was not received" every 2 s forever, which
-      # buries real planner warnings in the log. navigation.launch.py only
-      # starts the info server when use_keepout_filter:=true, so the default
-      # path was always the noisy one. Turn this back on together with that
-      # launch argument.
+      # Safe to leave enabled — if info server not running it no-ops.
       keepout_filter:
         plugin: "nav2_costmap_2d::KeepoutFilter"
-        enabled: false
+        enabled: true
         filter_info_topic: "/costmap_filter_info"
 
 # ── Map server (navigation map) ───────────────────────────────────────────────
@@ -401,10 +324,10 @@ behavior_server:
       plugin: "nav2_behaviors/DriveOnHeading"
     wait:
       plugin: "nav2_behaviors/Wait"
-    simulate_ahead_time: 1.2
-    max_rotational_vel: 0.55   # raised on request (past the 0.45 measured-honest point; firmware clamps ~0.50)
-    min_rotational_vel: 0.08
-    rotational_acc_lim: 2.2
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 0.60
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
 
 # ── Waypoint follower ─────────────────────────────────────────────────────────
 waypoint_follower:
@@ -425,28 +348,13 @@ velocity_smoother:
   ros__parameters:
     use_sim_time: false
     smoothing_frequency: 20.0
-    scale_velocities: false
+    scale_velocities: true
     feedback: "OPEN_LOOP"
-    # This is the hard ceiling — nothing downstream can exceed it, so the
-    # controller limits above are pointless without raising it here too.
-    # Linear stays conservative: 0.15 m/s tracked to within 2% on this robot
-    # but 0.22 m/s was erratic, so 0.20 is the honest ceiling.
-    # Angular ceiling is 0.45, not 0.50, and that is a measured choice.
-    # turntest.py (gyro as ground truth, 2026-07-27) gave achieved/commanded:
-    #   0.15 -> 0.87   0.25 -> 0.86   0.35 -> 0.87   0.45 -> 1.02   0.50 -> 1.19
-    # The response stays honest up to 0.45 and then runs away. Nav2's
-    # controllers assume commanded ~= achieved, so operating in the 1.19 region
-    # buys nothing but heading overshoot. rotate_to_heading_angular_vel is
-    # 0.45 anyway, so nothing is lost -- and it is still 2.25x the old 0.20.
-    max_velocity: [ 0.28, 0.0,  0.60]
-    min_velocity: [-0.28, 0.0, -0.60]
-    # Accel limits are what make the motion SMOOTH rather than stepped. The
-    # controller runs at only 5 Hz on the Pi, so the smoother's 20 Hz ramp is
-    # doing most of the work of turning 5 Hz staircase commands into
-    # continuous motion. 1.5 rad/s² reaches full turn rate in ~0.33 s.
-    max_accel:    [ 0.6,  0.0,  2.2]
-    max_decel:    [-0.7,  0.0, -2.2]
-    odom_topic: /odometry/filtered
+    max_velocity: [ 0.25, 0.0,  0.60]
+    min_velocity: [-0.25, 0.0, -0.60]
+    max_accel:    [ 2.0,  0.0,  3.2]
+    max_decel:    [-2.0,  0.0, -3.2]
+    odom_topic: /odom
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0

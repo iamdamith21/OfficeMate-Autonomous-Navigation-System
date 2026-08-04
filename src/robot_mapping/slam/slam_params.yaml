@@ -1,8 +1,13 @@
 # SLAM Toolbox — async online mapping with Ceres pose-graph optimization.
-# Tuned for the LitraTech LTME-02A (270° FoV, 30 Hz). The 270° FoV has a blind
-# rear arc and is feature-poorer than a 360° lidar, so loop closure is made
-# strict (few false loops) and the graph optimization uses a robust Huber loss
-# so a single bad loop closure can't warp the whole map.
+# Tuned for LTME-02A LiDAR (270° FoV).
+#
+# Keyframe spacing & loop closure settings are tuned for crisp single-loop mapping:
+# 1. minimum_travel_distance = 0.25m / minimum_travel_heading = 0.30 rad:
+#    Prevents pose-graph node bloat and stops redundant scan overlay/ghosting
+#    when driving over the same area multiple times.
+# 2. Strict loop closure thresholds (0.45/0.55):
+#    Ensures loop closure only fires on high-confidence matches so double-walls are eliminated.
+
 slam_toolbox:
   ros__parameters:
     solver_plugin: solver_plugins::CeresSolver
@@ -19,8 +24,8 @@ slam_toolbox:
     mode: mapping
 
     debug_logging: false
-    throttle_scans: 2
-    transform_publish_period: 0.02      # 50 Hz TF → no extrapolation
+    throttle_scans: 1
+    transform_publish_period: 0.04      # 25 Hz TF — saves CPU
     map_update_interval: 2.0
     resolution: 0.05
     max_laser_range: 12.0
@@ -31,29 +36,30 @@ slam_toolbox:
 
     use_scan_matching: true
     use_scan_barycenter: true
-    # Leaner keyframe graph (was 0.05/0.1): fewer nodes → faster optimization
-    # on the Pi, still dense enough for a small indoor robot.
-    minimum_travel_distance: 0.05
-    minimum_travel_heading: 0.08
-    scan_buffer_size: 20                 # more matching context (was 10)
-    scan_buffer_maximum_scan_distance: 10.0
-    link_match_minimum_response_fine: 0.12
-    link_scan_maximum_distance: 1.5
-    # Loop closure (pose-graph optimization trigger): search a bit wider but
-    # accept only high-confidence matches so the 270° FoV can't spawn false loops.
-    loop_search_maximum_distance: 4.0    # was 3.0
-    do_loop_closing: true
-    loop_match_minimum_chain_size: 10
-    loop_match_maximum_variance_coarse: 3.0
-    loop_match_minimum_response_coarse: 0.40   # was 0.35
-    loop_match_minimum_response_fine: 0.50     # was 0.45 (stricter)
 
-    correlation_search_space_dimension: 0.8
+    # Keyframe density: 25cm / 17deg travel before creating a new graph node.
+    # Eliminates node bloat and prevents double/ghost wall mapping.
+    minimum_travel_distance: 0.25
+    minimum_travel_heading: 0.30
+    scan_buffer_size: 20                 # retains 20 scans for scan matching
+    scan_buffer_maximum_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.15
+    link_scan_maximum_distance: 1.5
+
+    # Loop closure: search up to 5.0m for loop closure, requiring strict confidence
+    loop_search_maximum_distance: 5.0
+    do_loop_closing: true
+    loop_match_minimum_chain_size: 8
+    loop_match_maximum_variance_coarse: 3.0
+    loop_match_minimum_response_coarse: 0.45
+    loop_match_minimum_response_fine: 0.55
+
+    correlation_search_space_dimension: 0.6
     correlation_search_space_resolution: 0.01
     correlation_search_space_smear_deviation: 0.05
 
-    distance_variance_penalty: 0.2
-    angle_variance_penalty: 0.3
+    distance_variance_penalty: 0.3
+    angle_variance_penalty: 0.5
     fine_search_angle_offset: 0.00349
     coarse_search_angle_offset: 0.349
     coarse_angle_resolution: 0.0349

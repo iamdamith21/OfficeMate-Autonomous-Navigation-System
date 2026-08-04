@@ -69,8 +69,8 @@ PUB_HZ = 20.0
 # scans, and a step change in velocity exceeds what it can track, injecting the
 # odometry error that smears walls. Angular is the slower of the two because
 # rotation is what scan matching handles worst.
-ACCEL = 0.30        # m/s²
-ANG_ACCEL = 0.9     # rad/s²
+ACCEL = 0.15        # m/s² (gentle ramp for scan-matching)
+ANG_ACCEL = 0.5     # rad/s² (gentle turn ramp)
 
 # Defaults matched to the MEASURED limits (2026-07-27 floor calibration), not
 # to what feels responsive. Both of these were previously above the calibrated
@@ -88,10 +88,26 @@ ANG_ACCEL = 0.9     # rad/s²
 #   is the odometry error that smears walls. 0.45 is where the measured
 #   commanded/achieved ratio was 1.02.
 #
-# Raise with +/- and [/] once a map comes out clean, but treat 0.20 and 0.50
-# as hard ceilings unless the firmware gain is re-derived.
-DEF_LIN = 0.18
-DEF_ANG = 0.45
+# RAISED 2026-08-02 off the true hardware limits rather than the cautious
+# floor-calibration figures above. The real saturation points, from the
+# firmware drive model (MIN_PWM 90, pwm = 90 + frac*165, MAX_SPEED_MPS
+# = MAX_RPM 100 / 60 * 2*pi * WHEEL_RADIUS 0.065 = 0.681 m/s):
+#
+#   Linear  saturates at 0.681 m/s.
+#   Angular saturates at 0.635 rad/s -- at a pivot, half_track =
+#           (WHEEL_SEP/2) * TURN_GAIN_PIVOT = 0.165 * 6.5 = 1.0725, so
+#           wheel = ang * 1.0725 hits MAX_SPEED_MPS at ang = 0.635.
+#           ABOVE 0.635 NOTHING CHANGES AT THE WHEELS -- the extra command is
+#           pure fiction that only lies to odometry. That is what wrecked the
+#           earlier maps (sessions were running at 2.5 rad/s, 4x fictional).
+#
+# So the honest usable band is everything BELOW those saturation points, and
+# the previous 0.20/0.50 caps were leaving real, trackable performance unused.
+# Defaults also raised because low PWM was stalling the robot outright: at
+# 0.18 m/s the wheels only see pwm 134, which on a 5-6 kg chassis with the
+# known pack sag is marginal for breaking stiction -- the "gets stuck".
+DEF_LIN = 0.20
+DEF_ANG = 0.35
 
 # (linear_sign, angular_sign, keep_linear, keep_angular)
 # keep_* means "leave that axis alone" — which is what turns an on-the-spot
@@ -155,14 +171,23 @@ class Drive:
                 self.tgt_lin = lin_sign * self.max_lin
             if not keep_ang:
                 self.tgt_ang = ang_sign * self.max_ang
+        # CEILINGS SET 2026-08-02 to the hardware saturation points, not above
+        # them. Originally 0.7 m/s / 2.5 rad/s, which let a held '+' / ']' push
+        # the command to 4x the point where the wheels are already flat out --
+        # sessions were running at -0.700 / -2.500 and the extra was pure
+        # fiction that only corrupted odometry and smeared the map. These caps
+        # are the real limits (see the DEF_LIN note): 0.60 rad/s sits just
+        # under the 0.635 pivot saturation, so everything up to the cap is
+        # still genuinely trackable. Going higher does not make the robot
+        # turn faster -- it only makes odometry wrong.
         elif key == '+':
-            self.max_lin = min(self.max_lin * 1.1, 0.7)
+            self.max_lin = min(self.max_lin * 1.1, 0.68)
         elif key == '-':
             self.max_lin = max(self.max_lin * 0.9, 0.05)
         elif key == '[':
             self.max_ang = max(self.max_ang * 0.9, 0.1)
         elif key == ']':
-            self.max_ang = min(self.max_ang * 1.1, 2.5)
+            self.max_ang = min(self.max_ang * 1.1, 0.635)
         elif key in ('z', '\x03'):
             return False
         else:
@@ -306,8 +331,8 @@ def main():
         else:
             print(HELP)
 
-        # Give discovery a moment, then check somebody is actually listening.
-        for _ in range(20):
+        # Give discovery a moment (3.5s), then check somebody is actually listening.
+        for _ in range(70):
             rclpy.spin_once(drive.node, timeout_sec=0.05)
             if drive.subscribers():
                 break
@@ -315,8 +340,7 @@ def main():
             print('\n*** WARNING: nothing is subscribed to /cmd_vel. ***')
             print('    arduino_bridge is not running, so the robot will NOT move.')
             print('    Start the stack first:')
-            print('      setsid nohup ~/fw_testing/start_mapping.sh '
-                  '</dev/null >~/fw_testing/mapping.log 2>&1 &\n')
+            print('      ros2 launch robot_mapping mapping.launch.py arduino_dev:=/dev/ttyACM0\n')
         else:
             print(f'/cmd_vel subscribers: {drive.subscribers()} — good.\n')
 
